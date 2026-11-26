@@ -1,0 +1,1474 @@
+﻿using Insnex.Utility;
+using Insnex.Vision2D.Core;
+using MvCamCtrl.NET;
+using System.Collections.Concurrent;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Xml.Linq;
+
+namespace HK_Inspection
+{
+    public class InsCamera2DHIK : IDisposable, IInsCamera2DBase
+    {
+
+        private string _errMessage = "";
+        private string _name = "";
+        private string _ip = "";
+        private string _serialNumber = "";
+        private int _timeOut = 0;
+        private int _bufferCount = 16;
+        private InsDeviceType _deviceType = InsDeviceType.Unkown;
+        private double _exposureTime; //曝光时间
+        private double _gain; //增益
+        private bool _isTriggerOn;
+        private bool _isConnected = false;
+        private bool _disconnectedEnable = false;
+        private bool _acqCompleted = false;
+        private bool _isLive = false;
+        private string _mManufacturerName = "";
+        private Ins2DImage _ins2Dimage = new Ins2DImage();
+        private InsImageType _imageFormat = InsImageType.Grey8;
+        private InsAcquisitionModeEnum _acquisitionMode = 0;
+
+        private IInsImage _imageToLive;
+        private readonly ConcurrentQueue<IInsImage> _imageList = new ConcurrentQueue<IInsImage>();
+        private readonly object _imageQueueLock = new object();
+        private readonly object _cameraOperationLock = new object();
+        private IInsImage OriginalImage;
+
+        public event CamReadyHandler OnCamAcqReady;
+        public event CamLiveHandler OnCamLive;
+        public event CamCompleteHandler OnCamComplete;
+        public event CamLostHandler OnCamLost;
+
+        private uint g_nPayloadSize = 0;
+        private uint nWidth = 0, nHeight = 0;
+
+        private bool m_bGrabbing = false;
+        private bool _isGrabbing;
+        private Thread m_hReceiveThread = null;
+
+        // private MyCamera.MV_CC_DEVICE_INFO device;
+        private MyCamera m_MyCamera = new MyCamera();
+        private MyCamera.cbExceptiondelegate pCallBackFunc;
+        private MyCamera.cbOutputExdelegate ImageCallback;
+        private Mutex m_mutex = new Mutex();
+        private Ins2DCamTriggerMode triggerMode;
+        #region 属性
+        public string Ip
+        {
+            get
+            {
+                return this._ip;
+            }
+            set
+            {
+                this._ip = value;
+            }
+        }
+        public string SerialNumber
+        {
+            get
+            {
+                return this._serialNumber;
+            }
+            set
+            {
+                this._serialNumber = value;
+            }
+        }
+
+        private int _CameraID;
+
+        public int CameraID
+        {
+            get { return _CameraID; }
+            set { _CameraID = value; }
+        }
+
+
+        public int TimeOut
+        {
+            get
+            {
+                return this._timeOut;
+            }
+            set
+            {
+                this._timeOut = value;
+            }
+        }
+        public Ins2DImage InsImage
+        {
+            get
+            {
+                return this._ins2Dimage;
+            }
+        }
+
+
+        public bool IsConnected
+        {
+            get
+            {
+                return this._isConnected;
+            }
+        }
+
+        public InsImageType ImageFormat
+        {
+            get
+            {
+                return this._imageFormat;
+            }
+            set
+            {
+                this._imageFormat = value;
+            }
+        }
+        public InsAcquisitionModeEnum AcquisitionMode
+        {
+            get
+            {
+                return this._acquisitionMode;
+            }
+            set
+            {
+                this._acquisitionMode = value;
+            }
+        }
+        public Ins2DCamTriggerMode TriggerMode
+        {
+            get
+            {
+                return this.triggerMode;
+            }
+            set
+            {
+                this.triggerMode = value;
+            }
+        }
+
+        public bool IsTriggerOn
+        {
+            get
+            {
+                return this._isTriggerOn;
+            }
+            set
+            {
+                this._isTriggerOn = value;
+            }
+        }
+        public IInsImage ImageToLive
+        {
+            get
+            {
+                return this._imageToLive;
+            }
+        }
+
+        public bool DisConnectedEnable
+        {
+            get
+            {
+                return this._disconnectedEnable;
+            }
+            set
+            {
+                this._disconnectedEnable = value;
+            }
+        }
+
+        public ConcurrentQueue<IInsImage> ImageList => this._imageList;
+
+        public int BufferCount
+        {
+            get
+            {
+                return this._bufferCount;
+            }
+            set
+            {
+                this._bufferCount = value;
+            }
+        }
+
+        public string Name
+        {
+            get { return this._name; }
+            set { this._name = value; }
+        }
+        public string Guid
+        {
+            get;
+            set;
+        }
+
+        public double ExposureTime
+        {
+            get
+            {
+                return _exposureTime;
+            }
+            set
+            {
+                _exposureTime = value;
+            }
+        }
+
+        public double Gain
+        {
+            get
+            {
+                return _gain;
+            }
+            set
+            {
+                _gain = value;
+            }
+        }
+
+        public string ErrMessage
+        {
+            get => _errMessage;
+            set => _errMessage = value;
+        }
+
+        private MyCamera.MV_CC_DEVICE_INFO _cameraInfo;
+
+        public MyCamera.MV_CC_DEVICE_INFO CameraInfo
+        {
+            get { return _cameraInfo; }
+            set { _cameraInfo = value; }
+        }
+
+
+        //当前曝光时间
+        InsDeviceType IInsDeviceBase.GetType()
+        {
+            return _deviceType;
+        }
+        #endregion
+
+
+        public bool TriggerModeOn()
+        {
+            int nRet = m_MyCamera.MV_CC_SetEnumValue_NET("TriggerMode", (uint)MyCamera.MV_CAM_TRIGGER_MODE.MV_TRIGGER_MODE_ON);
+            if (nRet != MyCamera.MV_OK)
+            {
+                _errMessage = "Failed to set trigger mode to ON.";
+                return false;
+            }
+
+            //nRet = m_MyCamera.MV_CC_SetEnumValue_NET("AcquisitionMode", 0);
+            nRet = m_MyCamera.MV_CC_SetEnumValue_NET("AcquisitionMode", (uint)MyCamera.MV_CAM_ACQUISITION_MODE.MV_ACQ_MODE_CONTINUOUS);
+
+            if (nRet != MyCamera.MV_OK)
+            {
+                //m_MyCamera.MV_CC_DestroyDevice_NET();
+                _errMessage = "Failed to set the acquisition mode to continuous.";
+                return false;
+            }
+
+            nRet = m_MyCamera.MV_CC_SetEnumValue_NET("TriggerSource", (uint)MyCamera.MV_CAM_TRIGGER_SOURCE.MV_TRIGGER_SOURCE_SOFTWARE);
+
+            if (nRet == 0)
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+
+        }
+        public bool TriggerModeOff()
+        {
+            int nRet = m_MyCamera.MV_CC_SetEnumValue_NET("TriggerMode", 0);
+            if (nRet == 0)
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        public bool SetTriggerMode(Ins2DCamTriggerMode mode)
+        {
+            int ret = 0;
+            if (mode == Ins2DCamTriggerMode.Software)
+            {
+                ret += m_MyCamera.MV_CC_SetEnumValue_NET("TriggerSource", (uint)7);
+                if (ret == 0)
+                {
+                    triggerMode = Ins2DCamTriggerMode.Software;
+                }
+            }
+            else
+            {
+                //ret += m_MyCamera.MV_CC_SetEnumValue_NET("TriggerSource", (uint)1);
+                if (mode == Ins2DCamTriggerMode.HardwareRisingEdge)
+                {
+                    ret += m_MyCamera.MV_CC_SetEnumValue_NET("TriggerActivation", (uint)0);
+                    if (ret == 0)
+                    {
+                        triggerMode = Ins2DCamTriggerMode.HardwareRisingEdge;
+                    }
+                }
+                else if (mode == Ins2DCamTriggerMode.HardwareFallingEdge)
+                {
+                    ret += m_MyCamera.MV_CC_SetEnumValue_NET("TriggerActivation", (uint)1);
+                    if (ret == 0)
+                    {
+                        triggerMode = Ins2DCamTriggerMode.HardwareFallingEdge;
+                    }
+                }
+                else if (mode == Ins2DCamTriggerMode.HardwareLevelHigh)
+                {
+                    ret += m_MyCamera.MV_CC_SetEnumValue_NET("TriggerActivation", (uint)2);
+                    if (ret == 0)
+                    {
+                        triggerMode = Ins2DCamTriggerMode.HardwareLevelHigh;
+                    }
+                }
+                else if (mode == Ins2DCamTriggerMode.HardwareLevelLow)
+                {
+                    ret += m_MyCamera.MV_CC_SetEnumValue_NET("TriggerActivation", (uint)3);
+                    if (ret == 0)
+                    {
+                        triggerMode = Ins2DCamTriggerMode.HardwareLevelLow;
+                    }
+                }
+                else if (mode == Ins2DCamTriggerMode.HardwareAnyEdge)
+                {
+                    ret += m_MyCamera.MV_CC_SetEnumValue_NET("TriggerActivation", (uint)4);
+                    if (ret == 0)
+                    {
+                        triggerMode = Ins2DCamTriggerMode.HardwareAnyEdge;
+                    }
+                }
+            }
+
+            if (ret == 0)
+            {
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        public bool EnableSoftwareTriggerMode()
+        {
+            return SetTriggerMode(Ins2DCamTriggerMode.Software);
+        }
+
+        public bool EnableHardwareRisingEdgeTrigger()
+        {
+            return SetTriggerMode(Ins2DCamTriggerMode.HardwareRisingEdge);
+        }
+
+        //设置曝光
+        public bool SetExposureTime(double timeInUs)
+        {
+
+            //if (_exposureTime == timeInUs)
+            //{
+            //    return true;
+            //}
+
+            // 设置曝光 
+            int nRet = MyCamera.MV_OK;
+            if (_mManufacturerName == "GEV" ||
+                        _mManufacturerName == "Hikvision" ||
+                        _mManufacturerName == "Machine Vision" ||
+                        _mManufacturerName == "Dahua Technology" ||
+                        _mManufacturerName == "Huaray Technology" ||
+                        _mManufacturerName == "Teledyne DALSA" ||
+                        _mManufacturerName == "Hikrobot" ||
+                        _mManufacturerName == "U3V")//海康相机
+            {
+                nRet = m_MyCamera.MV_CC_SetFloatValue_NET("ExposureTime", (float)timeInUs);
+            }
+            else
+            {
+                nRet = m_MyCamera.MV_CC_SetFloatValue_NET("ExposureTimeAbs", (float)timeInUs);
+            }
+            if (nRet != MyCamera.MV_OK)
+            {
+                // InsMessageManager.GInstance.Alarm("曝光设置失败", Insnex.Common.InsErrorCode.Err_Unknown);
+                return false;
+            }
+            else
+            {
+                _exposureTime = timeInUs;
+            }
+            return true;
+
+        }
+
+        /// <summary>
+        /// 设置相机增益
+        /// </summary>
+        /// <param name="value"></param>
+        public bool SetGainValue(double value)
+        {
+            m_MyCamera.MV_CC_SetEnumValue_NET("GainAuto", 0);
+            int nRet = m_MyCamera.MV_CC_SetFloatValue_NET("Gain", (float)value);
+            if (nRet != MyCamera.MV_OK)
+            {
+                _errMessage = string.Format("Failed to set camera gain value, error code:{0}" ,nRet);
+                return false;
+            }
+            _gain = value;
+            return true;
+        }
+
+        public void SetTimesOut(uint value)
+        {
+            int nRet = m_MyCamera.MV_CC_SetIntValue_NET("ConnectionTimeout", value);
+            if (nRet != MyCamera.MV_OK)
+            {
+                _errMessage = string.Format("Camera connection timeout failed, error code:{0}", nRet);
+            }
+        }
+
+        public void StartAcquirImage()
+        {
+            ClearImageQueue();
+            m_bGrabbing = true;
+        }
+
+        private void EnqueueImage(IInsImage image)
+        {
+            if (image == null)
+                return;
+
+            lock (_imageQueueLock)
+            {
+                _imageList.Enqueue(image);
+                int maxCount = Math.Max(1, _bufferCount);
+                while (_imageList.Count > maxCount)
+                    _imageList.TryDequeue(out IInsImage discardedImage);
+            }
+        }
+
+        private void ClearImageQueue()
+        {
+            lock (_imageQueueLock)
+            {
+                while (_imageList.TryDequeue(out IInsImage discardedImage))
+                {
+                }
+            }
+        }
+
+        public void StopAcquirImage()
+        {
+            m_bGrabbing = false;
+        }
+        public void ClearBuffer(ref MyCamera.MV_FRAME_OUT pFrame)
+        {
+            if (m_MyCamera != null)
+                m_MyCamera.MV_CC_FreeImageBuffer_NET(ref pFrame);
+        }
+        public static int IPAddressCompare(string ip1, string ip2)
+        {
+            if (string.IsNullOrEmpty(ip1))
+            {
+                return -1;
+            }
+            if (string.IsNullOrEmpty(ip2))
+            {
+                return 1;
+            }
+            string[] splits1 = ip1.Split(new char[] { '.' });
+            string[] splits2 = ip2.Split(new char[] { '.' });
+            if (splits1 == null)
+            {
+                return -1;
+            }
+            if (splits2 == null)
+            {
+                return 1;
+            }
+            if (splits1.Length > splits2.Length)
+            {
+                return 1;
+            }
+            if (splits1.Length < splits2.Length)
+            {
+                return -1;
+            }
+            for (int i = 0; i < splits1.Length; i++)
+            {
+                int ret = splits1[i].CompareTo(splits2[i]);
+                if (ret != 0)
+                {
+                    return ret;
+                }
+            }
+            return 0;
+
+        }
+        public void ConnectCamera()
+        {
+            if (null == m_MyCamera)
+            {
+                m_MyCamera = new MyCamera();
+                if (null == m_MyCamera)
+                {
+                    _errMessage = "Failed to initialize the camera object.";
+                    _isConnected = false;
+                    return;
+                }
+            }
+            try
+            {
+                uint ret = MyCamera.MV_CC_GetSDKVersion_NET();
+            }
+            catch
+            {
+                m_MyCamera = null;
+                System.Windows.Forms.MessageBox.Show(
+                        "MVS SDK environment not detected.\n" +
+                        "Please ensure that the SDK environment is properly configured.",
+                        "Warning",
+                        System.Windows.Forms.MessageBoxButtons.OK,
+                        System.Windows.Forms.MessageBoxIcon.Warning);
+
+                return;
+            }
+            
+             MyCamera.MV_CC_DEVICE_INFO_LIST m_stDeviceList = new MyCamera.MV_CC_DEVICE_INFO_LIST();
+
+            int nRet = -1;
+
+            try
+            {
+                nRet = MyCamera.MV_CC_EnumDevices_NET(MyCamera.MV_GIGE_DEVICE | MyCamera.MV_USB_DEVICE, ref m_stDeviceList);
+            }
+            catch { }
+
+            if (0 != nRet || m_stDeviceList.nDeviceNum == 0)
+            {
+                _errMessage = "Camera not found (Ethernet or USB).";
+            }
+            for (int i = 0; i < m_stDeviceList.nDeviceNum; i++)
+            {
+                MyCamera.MV_CC_DEVICE_INFO device = (MyCamera.MV_CC_DEVICE_INFO)Marshal.PtrToStructure(m_stDeviceList.pDeviceInfo[i], typeof(MyCamera.MV_CC_DEVICE_INFO));
+
+                if (device.nTLayerType == MyCamera.MV_GIGE_DEVICE)//网口相机
+                {
+                    IntPtr buffer = Marshal.UnsafeAddrOfPinnedArrayElement(device.SpecialInfo.stGigEInfo, 0);
+                    MyCamera.MV_GIGE_DEVICE_INFO gigeInfo = (MyCamera.MV_GIGE_DEVICE_INFO)Marshal.PtrToStructure(buffer, typeof(MyCamera.MV_GIGE_DEVICE_INFO));
+
+                    uint nIp1 = ((gigeInfo.nCurrentIp & 0xff000000) >> 24);
+                    uint nIp2 = ((gigeInfo.nCurrentIp & 0x00ff0000) >> 16);
+                    uint nIp3 = ((gigeInfo.nCurrentIp & 0x0000ff00) >> 8);
+                    uint nIp4 = (gigeInfo.nCurrentIp & 0x000000ff);
+
+                    string nIp = nIp1 + "." + nIp2 + "." + nIp3 + "." + nIp4;
+                    if (nIp.Trim() == this._ip)
+                    {
+                        #region 连接网口相机
+                        nRet = m_MyCamera.MV_CC_CreateDevice_NET(ref device);
+                        if (MyCamera.MV_OK != nRet)
+                        {
+                            _errMessage = string.Format("Failed to connect to the camera, IP:{0}", this._ip);
+                            _isConnected = false;
+                            return;
+                        }
+
+                        nRet = m_MyCamera.MV_CC_OpenDevice_NET();
+                        if (MyCamera.MV_OK != nRet)
+                        {
+                            m_MyCamera.MV_CC_DestroyDevice_NET();
+                            _errMessage = string.Format("Failed to open to the camera, IP:{0}", this._ip);
+                            _isConnected = false;
+                            return;
+                        }
+
+                        int nPacketSize = m_MyCamera.MV_CC_GetOptimalPacketSize_NET();
+                        if (nPacketSize > 0)
+                        {
+                            nRet = m_MyCamera.MV_CC_SetIntValue_NET("GevSCPSPacketSize", (uint)nPacketSize);
+                            if (nRet != MyCamera.MV_OK)
+                            {
+                                m_MyCamera.MV_CC_DestroyDevice_NET();
+                                _errMessage = "Failed to write network packet size.";
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            m_MyCamera.MV_CC_DestroyDevice_NET();
+                            _errMessage = "Failed to get network packet size.";
+                            return;
+                        }
+
+                        pCallBackFunc = new MyCamera.cbExceptiondelegate(cbExceptiondelegate);
+
+                        // ch:注册异常回调函数 | en:Register Exception Callback
+                        nRet = m_MyCamera.MV_CC_RegisterExceptionCallBack_NET(pCallBackFunc, IntPtr.Zero);
+                        if (MyCamera.MV_OK != nRet)
+                        {
+                            _errMessage = "Failed to register exception callback function.";
+                            _isConnected = false;
+                        }
+                        MyCamera.MVCC_FLOATVALUE pstValue1 = new MyCamera.MVCC_FLOATVALUE();
+
+
+                        nRet = m_MyCamera.MV_CC_GetFloatValue_NET("ExposureTime", ref pstValue1);
+
+                        // nRet = m_MyCamera.MV_CC_GetFloatValue_NET("ExposureTimeAbs", ref pstValue1);
+                        if (nRet != MyCamera.MV_OK)
+                        {
+                            _errMessage = "Failed to retrieve the camera exposure time.";
+                            return;
+                        }
+                        _exposureTime = pstValue1.fCurValue;
+
+                        nRet = m_MyCamera.MV_CC_GetFloatValue_NET("Gain", ref pstValue1);
+                        if (nRet != MyCamera.MV_OK)
+                        {
+                            _errMessage = "Failed to retrieve the camera gain.";
+                            return;
+                        }
+                        _gain = pstValue1.fCurValue;
+
+                        GC.KeepAlive(pCallBackFunc);
+                        _deviceType = InsDeviceType.Camera2DGige;
+                        _isConnected = true;
+
+                        break;
+                        #endregion
+                    }
+                    else
+                    {
+                        _errMessage = "No camera found with the specified IP address.";
+                    }
+                }
+                else if (device.nTLayerType == MyCamera.MV_USB_DEVICE)//USB3.0相机
+                {
+                    IntPtr buffer = Marshal.UnsafeAddrOfPinnedArrayElement(device.SpecialInfo.stUsb3VInfo, 0);
+                    MyCamera.MV_USB3_DEVICE_INFO usbInfo = (MyCamera.MV_USB3_DEVICE_INFO)Marshal.PtrToStructure(buffer, typeof(MyCamera.MV_USB3_DEVICE_INFO));
+
+                    if (usbInfo.chSerialNumber == _serialNumber)
+                    {
+                        #region 连接USB3.0相机
+                        nRet = m_MyCamera.MV_CC_CreateDevice_NET(ref device);
+                        if (MyCamera.MV_OK != nRet)
+                        {
+                            _errMessage = string.Format("Failed to connect to the camera, serialNumber:{0}", this._serialNumber);
+                            _isConnected = false;
+                            return;
+                        }
+                        nRet = m_MyCamera.MV_CC_OpenDevice_NET();
+                        if (MyCamera.MV_OK != nRet)
+                        {
+                            m_MyCamera.MV_CC_DestroyDevice_NET();
+                            _errMessage = string.Format("Failed to open to the camera, serialNumber:{0}", this._serialNumber);
+                            _isConnected = false;
+                            return;
+                        }
+                        pCallBackFunc = new MyCamera.cbExceptiondelegate(cbExceptiondelegate);
+                        // ch:注册异常回调函数 | en:Register Exception Callback
+                        nRet = m_MyCamera.MV_CC_RegisterExceptionCallBack_NET(pCallBackFunc, IntPtr.Zero);
+                        if (MyCamera.MV_OK != nRet)
+                        {
+                            _errMessage = "Failed to register exception callback function.";
+                            _isConnected = false;
+                        }
+                        GC.KeepAlive(pCallBackFunc);
+                        #endregion
+                        _deviceType = InsDeviceType.Camera2DUSB;
+                        _isConnected = true;
+                        break;
+                    }
+                    else
+                    {
+                        _errMessage = "No camera found with the specified serial number.";
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 相机掉线监控
+        /// </summary>
+        /// <param name="nMsgType"></param>
+        /// <param name="pUser"></param>
+        private void cbExceptiondelegate(uint nMsgType, IntPtr pUser)
+        {
+            if (nMsgType == MyCamera.MV_EXCEPTION_DEV_DISCONNECT)//相机掉线
+            {
+                _isConnected = false;
+
+                CloseCamera();
+                int i = 1;
+                while (true)
+                {
+                    ConnectCamera();
+                    if (_isConnected)
+                    {
+                        SetParams();
+                        OpenCamera();
+                        //InsMessageManager.GInstance.Warn(string.Format("相机:{0}重连成功", Name, i++));
+                        break;
+                    }
+                    else
+                    {
+                        //InsMessageManager.GInstance.Alarm(string.Format("相机:{0}掉线 正在尝试第{1}次重连", Name, i++), Insnex.Common.InsErrorCode.Err_Unknown);
+                    }
+                }
+            }
+        }
+        public void GetParams()
+        {
+            int nRet = MyCamera.MV_OK;
+
+            MyCamera.MVCC_INTVALUE stParam = new MyCamera.MVCC_INTVALUE();
+            nRet = m_MyCamera.MV_CC_GetIntValue_NET("PayloadSize", ref stParam);
+            if (MyCamera.MV_OK != nRet)
+            {
+                _errMessage = "获取相机:" + Name + " 包大小失败";
+                return;
+            }
+            g_nPayloadSize = stParam.nCurValue;
+
+            nRet = m_MyCamera.MV_CC_GetIntValue_NET("Height", ref stParam);
+            if (MyCamera.MV_OK != nRet)
+            {
+                _errMessage = "获取相机:" + Name + " 图像高度失败";
+                return;
+            }
+            nHeight = stParam.nCurValue;
+
+            // ch:获取宽 || en: Get Width
+            nRet = m_MyCamera.MV_CC_GetIntValue_NET("Width", ref stParam);
+            if (MyCamera.MV_OK != nRet)
+            {
+                _errMessage = "获取相机:" + Name + " 图像宽度失败";
+                return;
+            }
+            nWidth = stParam.nCurValue;
+
+            MyCamera.MVCC_ENUMVALUE pstValue = new MyCamera.MVCC_ENUMVALUE();
+            nRet = m_MyCamera.MV_CC_GetEnumValue_NET("AcquisitionMode", ref pstValue);
+            if (nRet != MyCamera.MV_OK)
+            {
+                _errMessage = "获取相机:" + Name + " 采图模式失败";
+                return;
+            }
+            if (pstValue.nCurValue == 0)
+            {
+                _acquisitionMode = InsAcquisitionModeEnum.SingleFrame;
+            }
+            else if (pstValue.nCurValue == 2)
+            {
+                _acquisitionMode = InsAcquisitionModeEnum.Continuous;
+            }
+
+            nRet = m_MyCamera.MV_CC_GetEnumValue_NET("TriggerMode", ref pstValue);
+            if (nRet != MyCamera.MV_OK)
+            {
+                _errMessage = "获取相机:" + Name + " 触发模式开关失败";
+                return;
+            }
+            if (pstValue.nCurValue == 0)
+            {
+                _isTriggerOn = false;
+            }
+            else if (pstValue.nCurValue == 1)
+            {
+                _isTriggerOn = true;
+            }
+
+            MyCamera.MVCC_ENUMVALUE triggerModeValue = new MyCamera.MVCC_ENUMVALUE();
+            nRet = m_MyCamera.MV_CC_GetEnumValue_NET("TriggerSource", ref triggerModeValue);
+            if (MyCamera.MV_OK != nRet)
+            {
+                _errMessage = "获取相机:" + Name + " 软硬件触发模式失败";
+                return;
+            }
+            //软触发
+            if (triggerModeValue.nCurValue == (uint)0)
+            {
+                triggerMode = Ins2DCamTriggerMode.Software;
+            }
+            else if (triggerModeValue.nCurValue == (uint)1)
+            {
+                MyCamera.MVCC_ENUMVALUE triggerSourceValue = new MyCamera.MVCC_ENUMVALUE();
+                nRet = m_MyCamera.MV_CC_GetEnumValue_NET("TriggerActivation", ref triggerSourceValue);
+                if (MyCamera.MV_OK != nRet)
+                {
+                    _errMessage = "获取相机:" + Name + " 硬件触发模式失败";
+                    return;
+                }
+                if (triggerSourceValue.nCurValue == (uint)0)
+                    triggerMode = Ins2DCamTriggerMode.HardwareRisingEdge;
+                else if (triggerSourceValue.nCurValue == (uint)1)
+                    triggerMode = Ins2DCamTriggerMode.HardwareFallingEdge;
+                else if (triggerSourceValue.nCurValue == (uint)2)
+                    triggerMode = Ins2DCamTriggerMode.HardwareLevelHigh;
+                else if (triggerSourceValue.nCurValue == (uint)3)
+                    triggerMode = Ins2DCamTriggerMode.HardwareLevelLow;
+                else if (triggerSourceValue.nCurValue == (uint)4)
+                    triggerMode = Ins2DCamTriggerMode.HardwareAnyEdge;
+            }
+
+
+
+            nRet = m_MyCamera.MV_CC_GetEnumValue_NET("PixelFormat", ref pstValue);
+            if (nRet != MyCamera.MV_OK)
+            {
+                _errMessage = "获取相机:" + Name + " 图像格式失败";
+                return;
+            }
+            if (pstValue.nCurValue == 17301505)
+            {
+                _imageFormat = InsImageType.Grey8;// InsPixelFormatEnum.Mono8;
+            }
+            else
+            {
+                _imageFormat = InsImageType.Color24;// InsPixelFormatEnum.Color;
+            }
+
+            MyCamera.MVCC_FLOATVALUE pstValue1 = new MyCamera.MVCC_FLOATVALUE();
+
+
+            nRet = m_MyCamera.MV_CC_GetFloatValue_NET("ExposureTime", ref pstValue1);
+
+            // nRet = m_MyCamera.MV_CC_GetFloatValue_NET("ExposureTimeAbs", ref pstValue1);
+            if (nRet != MyCamera.MV_OK)
+            {
+                _errMessage = "获取相机:" + Name + " 曝光失败";
+                return;
+            }
+            _exposureTime = pstValue1.fCurValue;
+
+            nRet = m_MyCamera.MV_CC_GetFloatValue_NET("Gain", ref pstValue1);
+            if (nRet != MyCamera.MV_OK)
+            {
+                _errMessage = "获取相机:" + Name + " 增益失败";
+                return;
+            }
+            _gain = pstValue1.fCurValue;
+
+            //save
+        }
+        public void SetParams()
+        {
+            int nRet = MyCamera.MV_OK;
+
+            if (_isLive == false)
+            {
+                //取像模式
+                switch (_acquisitionMode)
+                {
+                    case InsAcquisitionModeEnum.SingleFrame:
+                        {
+                            nRet = m_MyCamera.MV_CC_SetEnumValue_NET("AcquisitionMode", (uint)MyCamera.MV_CAM_ACQUISITION_MODE.MV_ACQ_MODE_SINGLE);
+                            if (nRet != MyCamera.MV_OK)
+                            {
+                                //m_MyCamera.MV_CC_DestroyDevice_NET();
+                                _errMessage = "设置相机:" + Name + " 取像模式为单次采集失败";
+                                return;
+                            }
+                            break;
+                        }
+                    case InsAcquisitionModeEnum.Continuous:
+                        {
+                            nRet = m_MyCamera.MV_CC_SetEnumValue_NET("AcquisitionMode", 0);
+                            if (nRet != MyCamera.MV_OK)
+                            {
+                                // m_MyCamera.MV_CC_DestroyDevice_NET();
+                                _errMessage = "设置相机:" + Name + " 取像模式为连续采集失败";
+                                return;
+                            }
+                            break;
+                        }
+                }
+
+                //触发模式
+                if (_isTriggerOn)
+                {
+
+
+                    nRet = m_MyCamera.MV_CC_SetEnumValue_NET("TriggerMode", (uint)1);
+                    if (nRet != MyCamera.MV_OK)
+                    {
+                        //m_MyCamera.MV_CC_DestroyDevice_NET();
+                        _errMessage = "设置相机:" + Name + " 触发模式打开失败";
+                        return;
+                    }
+
+                }
+                else
+                {
+
+                    nRet = m_MyCamera.MV_CC_SetEnumValue_NET("TriggerMode", (uint)0);
+                    if (nRet != MyCamera.MV_OK)
+                    {
+                        // m_MyCamera.MV_CC_DestroyDevice_NET();
+                        _errMessage = "设置相机:" + Name + " 触发模式关闭失败";
+                        return;
+                    }
+
+                }
+                SetTriggerMode(triggerMode);
+                //图像格式
+                switch (_imageFormat)
+                {
+                    case InsImageType.Grey8:
+                        {
+                            nRet = m_MyCamera.MV_CC_SetEnumValue_NET("PixelFormat", Convert.ToUInt32(MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono8));
+
+                            if (MyCamera.MV_OK != nRet)
+                            {
+                                //m_MyCamera.MV_CC_DestroyDevice_NET();
+                                _errMessage = "设置相机:" + Name + " 黑白图像格式失败";
+                                return;
+                            }
+                            break;
+                        }
+
+                    case InsImageType.Color24:
+                        {
+                            nRet = m_MyCamera.MV_CC_SetEnumValue_NET("PixelFormat", Convert.ToUInt32(MyCamera.MvGvspPixelType.PixelType_Gvsp_BGR8_Packed));
+
+                            if (MyCamera.MV_OK != nRet)
+                            {
+                                //m_MyCamera.MV_CC_DestroyDevice_NET();
+                                _errMessage = "设置相机:" + Name + " 彩色图像格式失败";
+                                return;
+                            }
+
+                            break;
+                        }
+                }
+            }
+
+
+            if (_mManufacturerName == "GEV" ||
+                        _mManufacturerName == "Hikvision" ||
+                        _mManufacturerName == "Machine Vision" ||
+                        _mManufacturerName == "Dahua Technology" ||
+                        _mManufacturerName == "Huaray Technology" ||
+                        _mManufacturerName == "Teledyne DALSA" ||
+                        _mManufacturerName == "Hikrobot" ||
+                        _mManufacturerName == "U3V")//海康相机
+            {
+                nRet = m_MyCamera.MV_CC_SetFloatValue_NET("ExposureTime", (float)_exposureTime);
+            }
+            else
+            {
+                nRet = m_MyCamera.MV_CC_SetFloatValue_NET("ExposureTimeAbs", (float)_exposureTime);
+            }
+
+
+
+            //nRet = m_MyCamera.MV_CC_SetFloatValue_NET("ExposureTimeAbs", (float)_exposureTime);
+            if (nRet != MyCamera.MV_OK)
+            {
+                m_MyCamera.MV_CC_DestroyDevice_NET();
+                _errMessage = "设置相机:" + Name + " 曝光失败";
+                return;
+            }
+
+
+
+
+            nRet = m_MyCamera.MV_CC_SetFloatValue_NET("Gain", (float)_gain);
+            if (nRet != MyCamera.MV_OK)
+            {
+                m_MyCamera.MV_CC_DestroyDevice_NET();
+                _errMessage = "设置相机:" + Name + " 增益失败";
+                return;
+            }
+
+        }
+        public void OpenCamera()
+        {
+            if (!_isConnected)
+                return;
+
+            int nRet = MyCamera.MV_OK;
+            m_bGrabbing = true;
+            // GetParams();
+            //开启连续软触发
+
+            bool triggerModeOn = TriggerModeOn();
+
+            ImageCallback = new MyCamera.cbOutputExdelegate(ImageCallbackFunc);
+            nRet = m_MyCamera.MV_CC_RegisterImageCallBackEx_NET(ImageCallback, IntPtr.Zero);
+
+            if (MyCamera.MV_OK != nRet)
+            {
+                _errMessage = "Failed to register camera callback function.";
+                m_bGrabbing = false;
+                return;
+            }
+
+            nRet = m_MyCamera.MV_CC_StartGrabbing_NET();
+            if (MyCamera.MV_OK != nRet)
+            {
+                _errMessage = "Failed to start camera stream.";
+                m_bGrabbing = false;
+                return;
+            }
+
+            //Console.WriteLine("Press enter to exit");
+            //Console.ReadLine();
+
+            //// ch:停止抓图 | en:Stop grabbing
+            //nRet = m_MyCamera.MV_CC_StopGrabbing_NET();
+            //if (MyCamera.MV_OK != nRet)
+            //{
+            //    Console.WriteLine("Stop grabbing failed{0:x8}", nRet);
+            //    return;
+            //}
+
+        }
+
+
+
+        /// <summary>
+        /// 回调取图-黑白
+        /// </summary>
+        /// <param name="pData"></param>
+        /// <param name="pFrameInfo"></param>
+        /// <param name="pUser"></param>
+        private void ImageCallbackFunc(IntPtr pData, ref MyCamera.MV_FRAME_OUT_INFO_EX pFrameInfo, IntPtr pUser)
+        {
+            //if (!m_bGrabbing)
+            //    return;
+            //灰度图
+            if (pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono8)
+            {
+                InsImage8Grey image = new InsImage8Grey(pFrameInfo.nWidth, pFrameInfo.nHeight);
+                IntPtr ImagePtr = image.Scan0;
+                //如果内存对齐
+                if (image.Width == image.Stride)
+                {
+                    MemoryOperator.CopyMemory(image.Scan0, pData, image.Width * image.Height);
+                }
+                else
+                {
+                    for (int i = 0; i < image.Height; i++)
+                    {
+                        MemoryOperator.CopyMemory(image.Scan0 + image.Stride * i, pData + image.Width * i, image.Width);
+                    }
+                }
+                _imageList.Enqueue(image);
+            }
+            else if (pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono10 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono10_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono12 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono12_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono14 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono16 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono1p ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono2p ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono4p ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono8_Signed)
+            {
+
+                IntPtr pBufForConvert = Marshal.AllocHGlobal((int)(pFrameInfo.nWidth * pFrameInfo.nHeight * 1));
+
+                MyCamera.MV_PIXEL_CONVERT_PARAM stConvertPixelParam = new MyCamera.MV_PIXEL_CONVERT_PARAM();
+                stConvertPixelParam.nWidth = pFrameInfo.nWidth;
+                stConvertPixelParam.nHeight = pFrameInfo.nHeight;
+                stConvertPixelParam.pSrcData = pData;
+                stConvertPixelParam.nSrcDataLen = pFrameInfo.nFrameLen;
+                stConvertPixelParam.enSrcPixelType = pFrameInfo.enPixelType;
+                stConvertPixelParam.enDstPixelType = MyCamera.MvGvspPixelType.PixelType_Gvsp_Mono8;
+                stConvertPixelParam.pDstBuffer = pBufForConvert;
+                stConvertPixelParam.nDstBufferSize = (uint)(pFrameInfo.nWidth * pFrameInfo.nHeight * 1);
+
+                int nRet = m_MyCamera.MV_CC_ConvertPixelType_NET(ref stConvertPixelParam);
+                if (MyCamera.MV_OK != nRet)
+                {
+                    _errMessage = string.Format("图像格式转换失败,错误码：{0}", nRet);
+                    //InsMessageManager.GInstance.Alarm(string.Format("图像格式转换失败,错误码：{0}", nRet), Insnex.Common.InsErrorCode.Err_Unknown);
+                }
+
+                InsImage8Grey image = new InsImage8Grey(stConvertPixelParam.nWidth, stConvertPixelParam.nHeight);
+                IntPtr ImagePtr = image.Scan0;
+                //如果内存对齐
+                if (image.Width == image.Stride)
+                {
+                    MemoryOperator.CopyMemory(image.Scan0, stConvertPixelParam.pDstBuffer, image.Width * image.Height);
+                }
+                else
+                {
+                    for (int i = 0; i < image.Height; i++)
+                    {
+                        MemoryOperator.CopyMemory(image.Scan0 + image.Stride * i, stConvertPixelParam.pDstBuffer + image.Width * i, image.Width);
+                    }
+                }
+                _imageList.Enqueue(image);
+
+
+                if (pBufForConvert != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(pBufForConvert);
+                    pBufForConvert = IntPtr.Zero;
+                }
+            }
+            //BRG彩色图
+            else if (pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BGR8_Packed)
+            {
+                InsImage24PlanarColor image = new InsImage24PlanarColor(pFrameInfo.nWidth, pFrameInfo.nHeight);
+                IntPtr ImagePtr = image.Scan0;
+                //如果内存对齐
+                if (image.Width * 3 == image.Stride)
+                {
+                    MemoryOperator.CopyMemory(image.Scan0, pData, image.Width * image.Height * 3);
+                }
+                else
+                {
+                    for (int i = 0; i < image.Height; i++)
+                    {
+                        MemoryOperator.CopyMemory(image.Scan0 + image.Stride * i, pData + image.Width * 3 * i, image.Width * 3);
+                    }
+                }
+                _imageList.Enqueue(image);
+            }
+            else if (pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_RGB8_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_YUV422_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_YUV422_YUYV_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerGR8 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerRG8 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerGB8 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerBG8 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerGB10 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerGB10_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerBG10 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerBG10_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerRG10 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerRG10_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerGR10 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerGR10_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerGB12 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerGB12_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerBG12 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerBG12_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerRG12 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerRG12_Packed ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerGR12 ||
+                pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_BayerGR12_Packed)
+            {
+
+                IntPtr pBufForConvert = Marshal.AllocHGlobal((int)(pFrameInfo.nWidth * pFrameInfo.nHeight * 3));
+
+                MyCamera.MV_PIXEL_CONVERT_PARAM stConvertPixelParam = new MyCamera.MV_PIXEL_CONVERT_PARAM();
+                stConvertPixelParam.nWidth = pFrameInfo.nWidth;
+                stConvertPixelParam.nHeight = pFrameInfo.nHeight;
+                stConvertPixelParam.pSrcData = pData;
+                stConvertPixelParam.nSrcDataLen = pFrameInfo.nFrameLen;
+                stConvertPixelParam.enSrcPixelType = pFrameInfo.enPixelType;
+                stConvertPixelParam.enDstPixelType = MyCamera.MvGvspPixelType.PixelType_Gvsp_BGR8_Packed;
+                stConvertPixelParam.pDstBuffer = pBufForConvert;
+                stConvertPixelParam.nDstBufferSize = (uint)(pFrameInfo.nWidth * pFrameInfo.nHeight * 3);
+
+                int nRet = m_MyCamera.MV_CC_ConvertPixelType_NET(ref stConvertPixelParam);
+                if (MyCamera.MV_OK != nRet)
+                {
+                    _errMessage = string.Format("图像格式转换失败,错误码：{0}", nRet);
+                    // InsMessageManager.GInstance.Alarm(string.Format("图像格式转换失败,错误码：{0}", nRet), Insnex.Common.InsErrorCode.Err_Unknown);
+                }
+
+                InsImage24PlanarColor image = new InsImage24PlanarColor(stConvertPixelParam.nWidth, stConvertPixelParam.nHeight);
+                IntPtr ImagePtr = image.Scan0;
+                //如果内存对齐
+                if (image.Width * 3 == image.Stride)
+                {
+                    MemoryOperator.CopyMemory(image.Scan0, stConvertPixelParam.pDstBuffer, image.Width * image.Height * 3);
+                }
+                else
+                {
+                    for (int i = 0; i < image.Height; i++)
+                    {
+                        MemoryOperator.CopyMemory(image.Scan0 + image.Stride * i, stConvertPixelParam.pDstBuffer + image.Width * 3 * i, image.Width * 3);
+                    }
+                }
+                _imageList.Enqueue(image);
+                if (pBufForConvert != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(pBufForConvert);
+                    pBufForConvert = IntPtr.Zero;
+                }
+            }
+            //RGB彩色图
+            //else if (pFrameInfo.enPixelType == MyCamera.MvGvspPixelType.PixelType_Gvsp_RGB8_Packed)
+            //{
+            //    InsImage24PlanarColor image = new InsImage24PlanarColor(pFrameInfo.nWidth, pFrameInfo.nHeight);
+            //    IntPtr ImagePtr = image.Scan0;
+            //    //如果内存对齐
+            //    //if (image.Width * 3 == image.Stride)
+            //    //{
+
+
+            //    //    MemoryOperator.CopyMemory(image.Scan0, pData, image.Width * image.Height * 3);
+            //    //}
+            //    //else
+
+            //    byte[] data = new byte[image.Width * 3];
+            //    byte temp;
+            //    for (int i = 0; i < image.Height; i++)
+            //    {
+            //        Marshal.Copy(pData + image.Width * 3 * i, data, 0, image.Width * 3);
+            //        for (int j = 0; j < image.Width; j++)
+            //        {
+            //            temp = data[j * 3];
+            //            data[j * 3] = data[j * 3 + 2];
+            //            data[j * 3 + 2] = temp;
+
+            //        }
+            //        Marshal.Copy(data, 0, image.Scan0 + image.Stride * i, image.Width * 3);
+
+            //    }
+
+            //    _imageList.Enqueue(image);
+            //}
+
+            else
+            {
+                _errMessage = "不支持的图像类型";
+                //InsMessageManager.GInstance.Alarm("不支持的图像类型", Insnex.Common.InsErrorCode.Err_Unknown);
+            }
+        }
+        /// <summary>
+        /// <summary>
+        /// 线程等待取图
+        /// </summary>
+
+        public void StopCamera()
+        {
+            if (m_MyCamera == null)
+                return;
+
+            if (m_bGrabbing == true && m_hReceiveThread != null)
+            {
+                m_bGrabbing = false;
+                m_hReceiveThread.Join();
+            }
+
+            int nRet;
+            nRet = m_MyCamera.MV_CC_StopGrabbing_NET();
+            if (nRet != MyCamera.MV_OK)
+            {
+            }
+        }
+        public void CloseCamera()
+        {
+            if (m_MyCamera == null)
+                return;
+
+            int nRet;
+
+            StopCamera();
+
+            nRet = m_MyCamera.MV_CC_CloseDevice_NET();
+            if (nRet != MyCamera.MV_OK)
+            {
+            }
+            nRet = m_MyCamera.MV_CC_DestroyDevice_NET();
+            if (nRet != MyCamera.MV_OK)
+            {
+            }
+        }
+        public IInsImage AcquireOneImage(double exposureTime, double timeoutInMs)
+        {
+            int nRet;
+            
+            if (!(triggerMode == Ins2DCamTriggerMode.Software))
+            {
+                _errMessage = "Not set to software trigger mode.";
+                return null;
+                // 设置曝光 
+                //SetExposureTime(exposureTime);
+                //SetGainValue((float)Gain);
+            }
+            if (OnCamAcqReady != null)
+            {
+                OnCamAcqReady();
+            }
+            //m_mutex.WaitOne();
+            if (triggerMode == Ins2DCamTriggerMode.Software)
+            {
+                nRet = m_MyCamera.MV_CC_SetCommandValue_NET("TriggerSoftware");
+                if(nRet != MyCamera.MV_OK)
+                {
+                    _errMessage = string.Format("Failed to execute node 'Softwares', error code: {0}", nRet);
+                    return null;
+                }
+
+            }
+
+            //获取图像
+            DateTime t1 = DateTime.Now;
+            TimeSpan timeoutSpan = new TimeSpan(0, 0, 0, 0, (int)timeoutInMs);
+            while (_imageList.Count <= 0)
+            {
+                DateTime t2 = DateTime.Now;
+                if (t2 - t1 > timeoutSpan)
+                {
+                    _errMessage = "Camera image acquisition timed out.";
+                    // InsMessageManager.GInstance.Warn("相机:" + Name + " 取图超时");
+                    break;
+                }
+                Thread.Yield();
+            }
+            if (_imageList.Count <= 0)
+            {
+                return null;
+            }
+            IInsImage retImage = _imageList.Dequeue();
+            // m_mutex.ReleaseMutex();
+            if (OnCamComplete != null)
+            {
+                OnCamComplete();
+            }
+
+            return retImage;
+        }
+        public IInsImage AcquireOneImage(double exposureTime)
+        {
+            int nRet;
+            if (triggerMode == Ins2DCamTriggerMode.Software)
+            {
+                // 设置曝光 
+                SetExposureTime(exposureTime);
+            }
+            if (OnCamAcqReady != null)
+            {
+                OnCamAcqReady();
+            }
+            //m_mutex.WaitOne();
+            if (triggerMode == Ins2DCamTriggerMode.Software)
+            {
+                int i = m_MyCamera.MV_CC_TriggerSoftwareExecute_NET();
+            }
+
+            //获取图像
+            while (_imageList.Count <= 0)
+            {
+                Thread.Yield();
+            }
+            if (_imageList.Count <= 0)
+            {
+                return null;
+            }
+            IInsImage retImage = _imageList.Dequeue();
+            //m_mutex.ReleaseMutex();
+            if (OnCamComplete != null)
+            {
+                OnCamComplete();
+            }
+            return retImage;
+        }
+        public void LiveImage()
+        {
+            int nRet;
+
+            if (_isLive)
+            {
+                nRet = m_MyCamera.MV_CC_StopGrabbing_NET();
+                if (nRet != MyCamera.MV_OK)
+                {
+                    _isLive = false;
+                    return;
+                }
+                _isLive = false;
+                return;
+
+            }
+
+            nRet = m_MyCamera.MV_CC_StopGrabbing_NET();
+            if (nRet != MyCamera.MV_OK)
+            {
+            }
+
+            nRet = m_MyCamera.MV_CC_SetEnumValue_NET("AcquisitionMode", (uint)MyCamera.MV_CAM_ACQUISITION_MODE.MV_ACQ_MODE_CONTINUOUS);
+            if (nRet != MyCamera.MV_OK)
+            {
+                m_MyCamera.MV_CC_DestroyDevice_NET();
+                _errMessage = "设置取像模式为连续采集失败";
+                return;
+            }
+
+            nRet = m_MyCamera.MV_CC_SetEnumValue_NET("TriggerMode", (uint)MyCamera.MV_CAM_TRIGGER_MODE.MV_TRIGGER_MODE_OFF);
+            if (nRet != MyCamera.MV_OK)
+            {
+                m_MyCamera.MV_CC_DestroyDevice_NET();
+                _errMessage = "设置触发模式为软触发失败";
+                return;
+            }
+
+            _isLive = true;
+
+            // ch:开始采集 | en:Start Grabbing
+            nRet = m_MyCamera.MV_CC_StartGrabbing_NET();
+            if (MyCamera.MV_OK != nRet)
+            {
+                return;
+            }
+        }
+        //public void LoadSetting()
+        //{
+        //    string str = Path.Combine(InsReceipeManager.GInstance.RecipeRootPath, InsReceipeManager.GInstance.CurrentRecipeName, "cameras", "Config.ini");
+
+        //    this._ip = InsCustomerConfigurationManager.GInstance.ReadSetting(this._name, "IP", "");
+        //    this._serialNumber = InsCustomerConfigurationManager.GInstance.ReadSetting(this._name, "SerialNumber", "");
+        //    this._timeOut = InsCustomerConfigurationManager.GInstance.ReadSetting(this._name, "TimeOut", 0);
+        //    this._imageFormat = (InsImageType)Enum.Parse(typeof(InsImageType), InsCustomerConfigurationManager.GInstance.ReadSetting(this._name, "ImageFormat", ""));
+        //    this._disconnectedEnable = InsCustomerConfigurationManager.GInstance.ReadSetting(this._name, "DisConnectedEnable", false);
+        //    this._acquisitionMode = (InsAcquisitionModeEnum)Enum.Parse(typeof(InsAcquisitionModeEnum), InsCustomerConfigurationManager.GInstance.ReadSetting(this._name, "AcquisitionMode", ""));
+        //    this.triggerMode = (InsCameraTriggerMode)Enum.Parse(typeof(InsCameraTriggerMode), InsCustomerConfigurationManager.GInstance.ReadSetting(this._name, "TriggerMode", ""));
+
+        //    this._exposureTime = Convert.ToDouble(InsCustomerConfigurationManager.GInstance.ReadSetting(this._name, "ExposeTime", ""));
+        //    this._gain = Convert.ToDouble(InsCustomerConfigurationManager.GInstance.ReadSetting(this._name, "Gain", ""));
+        //}
+        //public void SaveSetting()
+        //{
+        //    InsCustomerConfigurationManager.GInstance.WriteSetting(this._name, "IP", this._ip);
+        //    InsCustomerConfigurationManager.GInstance.WriteSetting(this._name, "SerialNumber", this._serialNumber);
+        //    InsCustomerConfigurationManager.GInstance.WriteSetting(this._name, "TimeOut", this._timeOut);
+        //    InsCustomerConfigurationManager.GInstance.WriteSetting(this._name, "ImageFormat", this._imageFormat.ToString());
+        //    InsCustomerConfigurationManager.GInstance.WriteSetting(this._name, "DisConnectedEnable", this._disconnectedEnable);
+        //    InsCustomerConfigurationManager.GInstance.WriteSetting(this._name, "AcquisitionMode", this._acquisitionMode.ToString());
+        //    InsCustomerConfigurationManager.GInstance.WriteSetting(this._name, "TriggerMode", this.triggerMode.ToString());
+
+        //    InsCustomerConfigurationManager.GInstance.WriteSetting(this._name, "ExposeTime", this._exposureTime);
+        //    InsCustomerConfigurationManager.GInstance.WriteSetting(this._name, "Gain", this._gain);
+        //}
+
+        void IDisposable.Dispose()
+        {
+            if (m_MyCamera != null)
+            {
+                try
+                {
+                    m_MyCamera.MV_CC_CloseDevice_NET();
+                    m_MyCamera.MV_CC_DestroyDevice_NET();
+                    m_MyCamera = null;
+
+                }
+                catch { }
+            }
+        }
+    }
+}

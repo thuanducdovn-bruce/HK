@@ -1,0 +1,30 @@
+﻿<?xml version='1.0' encoding='utf-8'?>
+<SettingsFile xmlns="http://schemas.microsoft.com/VisualStudio/2004/01/settings" CurrentProfile="(Default)" GeneratedClassNamespace="HK_Inspection.Properties" GeneratedClassName="Settings">
+  <Profiles />
+  <Settings>
+    <Setting Name="PlcIPAdress" Type="System.String" Scope="User">
+      <Value Profile="(Default)">192.168.1.10</Value>
+    </Setting>
+    <Setting Name="PlcPort" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">3000</Value>
+    </Setting>
+    <Setting Name="SNCam1" Type="System.String" Scope="User">
+      <Value Profile="(Default)">123</Value>
+    </Setting>
+    <Setting Name="SNCam2" Type="System.String" Scope="User">
+      <Value Profile="(Default)">234</Value>
+    </Setting>
+    <Setting Name="SNCam3" Type="System.String" Scope="User">
+      <Value Profile="(Default)">345</Value>
+    </Setting>
+    <Setting Name="HistoryDirectory" Type="System.String" Scope="User">
+      <Value Profile="(Default)">F:\Vision History</Value>
+    </Setting>
+    <Setting Name="LoadingTime" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">10000</Value>
+    </Setting>
+    <Setting Name="ModelsDirectory" Type="System.String" Scope="User">
+      <Value Profile="(Default)">F:\Models</Value>
+    </Setting>
+  </Settings>
+</SettingsFile>

@@ -1,0 +1,49 @@
+﻿using Insnex.Vision2D.ToolBlock;
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace HK_Inspection
+{
+    public partial class FormMain : Form
+    {
+
+        Form activeForm;
+        FormRun formRun;
+        FormSetting formSetting;
+        Camera camera;
+        InsToolBlock job;
+        VisionControl visionControl;
+        List<InsToolBlock> toolBlockManager;
+        public string ModelSetting { get; private set; }
+
+        System.Timers.Timer clock = new System.Timers.Timer();
+
+        bool[] camConnection = new bool[3];
+        public string network1 = "Ethernet";
+        public string network2 = "Ethernet CAM1";
+        public string network3 = "Ethernet CAM2";
+        public string network4 = "Ethernet CAM3";
+
+        public FormMain()
+        {
+            InitializeComponent();
+        }
+
+        public void Initialize(Camera camera, InsToolBlock job, VisionControl visionControl,
+            List<InsToolBlock> toolBlockManager, string modelSetting)
+        {
+            this.camera = camera;
+            this.job = job;
+            this.visionControl = visionControl;
+            this.toolBlockManager = toolBlockManager;
+            ModelSetting = modelSetting;
+        }
+    }
+}

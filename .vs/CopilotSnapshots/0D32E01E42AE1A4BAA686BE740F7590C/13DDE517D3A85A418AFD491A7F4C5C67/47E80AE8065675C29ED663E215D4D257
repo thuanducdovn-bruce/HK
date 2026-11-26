@@ -1,0 +1,97 @@
+﻿using System;
+
+using System.Collections.Generic;
+using System.Windows.Forms;
+using Insnex.Vision2D;
+using Insnex.Vision2D.Core;
+using Insnex.Vision2D.ToolBlock;
+using InsWorks.Studio;
+
+namespace HK_Inspection
+{
+    public class VisionControl
+    {
+        private bool mAttached;
+        public List<InsToolBlock> _insToolBlockManager = new List<InsToolBlock>();
+
+        public enum RunState { Stopped, RunningContinuous, RunningOnce, RunningLive }
+        public RunState mCurrentRunState = RunState.Stopped;
+
+        public class VisionControlUserResultAvailableEventArgs : EventArgs
+        {
+            public string JobName;
+            public object Result;
+            public object JobStatus;
+            public InsRecord LastRunRecord;
+
+            public VisionControlUserResultAvailableEventArgs(string jobName, object result,
+                object jobStatus, InsRecord lastRunRecord)
+            {
+                JobName = jobName;
+                Result = result;
+                JobStatus = jobStatus;
+                LastRunRecord = lastRunRecord;
+            }
+        }
+
+        public delegate void VisionControlUserResultAvailableEventHandler(object sender,
+            VisionControlUserResultAvailableEventArgs e);
+        public event VisionControlUserResultAvailableEventHandler VisionControlUserResultAvailable;
+
+        public VisionControl(ref List<InsToolBlock> toolBlocks)
+        {
+            _insToolBlockManager = toolBlocks;
+        }
+
+        public void AttachToJobManager(bool attach)
+        {
+            if (attach == mAttached)
+                return;
+
+            foreach (InsToolBlock toolBlock in _insToolBlockManager)
+            {
+                if (attach)
+                    toolBlock.Ran += InsToolBlock_Ran;
+                else
+                    toolBlock.Ran -= InsToolBlock_Ran;
+            }
+
+            mAttached = attach;
+        }
+
+        private void InsToolBlock_Ran(object sender, EventArgs e)
+        {
+            InsToolBlock toolBlock = sender as InsToolBlock;
+            if (toolBlock == null)
+                return;
+
+            InsRecord record = toolBlock.CreateLastRunRecord() as InsRecord;
+            VisionControlUserResultAvailable?.Invoke(this,
+                new VisionControlUserResultAvailableEventArgs(
+                    toolBlock.Name, toolBlock.Outputs, toolBlock.RunStatus, record));
+        }
+
+        public void StartRunningOnce(IInsImage inputImage, int toolblockIndex, int position)
+        {
+            try
+            {
+                if (inputImage == null)
+                    throw new ArgumentNullException("inputImage");
+                if (toolblockIndex < 0 || toolblockIndex >= _insToolBlockManager.Count)
+                    throw new ArgumentOutOfRangeException("toolblockIndex");
+
+                if (position > 3)
+                    position -= 3;
+
+                InsToolBlock toolBlock = _insToolBlockManager[toolblockIndex];
+                toolBlock.Inputs["Sequence"].Value = position;
+                toolBlock.Inputs["InputImage" + position].Value = inputImage;
+                toolBlock.Run();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.ToString());
+            }
+        }
+    }
+}

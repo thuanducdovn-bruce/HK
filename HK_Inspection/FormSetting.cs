@@ -1,0 +1,339 @@
+﻿using Insnex.Vision2D.ToolBlock;
+using System;
+using System.Linq;
+using System.Reflection;
+using System.Windows.Forms;
+
+namespace HK_Inspection
+{
+    public partial class FormSetting : Form
+    {
+        private Camera camera;
+        private VisionControl visionControl;
+        private InsToolBlock job;
+        private readonly Label lbProgramStatus = new Label();
+        private bool isLive;
+
+        public FormSetting()
+        {
+            InitializeComponent();
+            Load += FormSetting_Load;
+            FormClosed += FormSetting_FormClosed;
+            btnLive.Click += btnLive_Click;
+            btnSetExposure.Click += btnSetExposure_Click;
+            btnRunOnce.Click += btnRunOnce_Click;
+            btnSaveToolBlock.Click += btnSaveToolBlock_Click;
+            btnTest.Click += btnTest_Click;
+            cbListCamera.SelectedIndexChanged += cbListCamera_SelectedIndexChanged;
+
+            SettingTabControl.TabPages.Remove(tabSpec);
+            SettingTabControl.TabPages.Remove(tabPLC);
+            groupBox1.Visible = false;
+            ckbUseCodeData.Visible = false;
+            lbDir.Visible = false;
+            tbHistoryDirectory.Visible = false;
+            btnOpenHistoryDialog.Visible = false;
+            label13.Visible = label14.Visible = label15.Visible = label16.Visible = false;
+            textBox2.Visible = textBox3.Visible = textBox4.Visible = textBox5.Visible = false;
+
+            cbSequence.Items.Clear();
+            cbSequence.Items.AddRange(new object[] { "1", "2", "3" });
+            cbSequence.SelectedIndex = 0;
+
+            lbProgramStatus.Dock = DockStyle.Fill;
+            lbProgramStatus.ForeColor = System.Drawing.SystemColors.Control;
+            lbProgramStatus.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
+            tableLayoutPanel2.Controls.Add(lbProgramStatus, 0, 5);
+
+            var otherOptions = new Label
+            {
+                Dock = DockStyle.Fill,
+                ForeColor = System.Drawing.SystemColors.Control,
+                Text = "No additional options configured.",
+                TextAlign = System.Drawing.ContentAlignment.MiddleCenter
+            };
+            tabOthers.Controls.Clear();
+            tabOthers.Controls.Add(otherOptions);
+        }
+
+        public void InitializeProgram(InsToolBlock toolBlock)
+        {
+            job = toolBlock;
+            cbListToolBlock.Items.Clear();
+            if (job != null)
+            {
+                cbListToolBlock.Items.Add(job.Name);
+                cbListToolBlock.SelectedIndex = 0;
+                SetEditorSubject(job);
+            }
+        }
+
+        public void InitializeDevices(Camera camera, VisionControl visionControl)
+        {
+            if (this.visionControl != null)
+                this.visionControl.VisionControlUserResultAvailable -= VisionControl_UserResultAvailable;
+
+            this.camera = camera;
+            this.visionControl = visionControl;
+            isLive = false;
+            btnLive.Text = "LIVE";
+            cbListCamera.Items.Clear();
+
+            if (camera != null)
+            {
+                for (int i = 0; i < 3 && i < camera.mCamera.Length; i++)
+                {
+                    if (camera.mCamera[i].isConnect)
+                        cbListCamera.Items.Add(string.Format("CAM {0}", i + 1));
+                }
+
+            }
+
+            if (visionControl != null)
+                visionControl.VisionControlUserResultAvailable += VisionControl_UserResultAvailable;
+
+            if (cbListCamera.Items.Count > 0)
+                cbListCamera.SelectedIndex = 0;
+            UpdateCameraControls();
+        }
+
+        #region Form Event
+        private void FormSetting_Load(object sender, EventArgs e)
+        {
+            UpdateCameraControls();
+        }
+
+        private void FormSetting_FormClosed(object sender, FormClosedEventArgs e)
+        {
+            InitializeDevices(null, null);
+        }
+        #endregion
+
+        #region Tab PLC
+        /* PLC is not currently used. Keep PLC access code disabled until the register map is defined.
+        private void btnWrite_Click(object sender, EventArgs e)
+        {
+        }
+
+        private void btnRead_Click(object sender, EventArgs e)
+        {
+        }
+        */
+        #endregion
+
+        #region Tab Camera
+        private void btnLive_Click(object sender, EventArgs e)
+        {
+            int cameraIndex = cbListCamera.SelectedIndex;
+            if (camera == null || cameraIndex < 0 || cameraIndex >= 3)
+                return;
+
+            try
+            {
+                if (!isLive)
+                {
+                    camera.SetupRunContinuos(cameraIndex);
+                    isLive = true;
+                    btnLive.Text = "STOP LIVE";
+                }
+                else
+                {
+                    camera.SetupRunOnce(cameraIndex);
+                    isLive = false;
+                    btnLive.Text = "LIVE";
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "Camera", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void btnSetExposure_Click(object sender, EventArgs e)
+        {
+            int cameraIndex = cbListCamera.SelectedIndex;
+            double exposure;
+            if (camera == null || cameraIndex < 0 || cameraIndex >= 3 ||
+                !double.TryParse(tbExposure.Text, out exposure) || exposure <= 0)
+            {
+                MessageBox.Show("Enter a valid exposure time.", "Camera", MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            InsCamera2DHIK device = camera.mCamera[cameraIndex].Device;
+            if (device == null || !device.SetExposureTime(exposure))
+                MessageBox.Show("Failed to set camera exposure.", "Camera", MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+        }
+
+        private void cbListCamera_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            int cameraIndex = cbListCamera.SelectedIndex;
+            if (camera == null || cameraIndex < 0 || cameraIndex >= 3)
+                return;
+
+            InsCamera2DHIK device = camera.mCamera[cameraIndex].Device;
+            if (device != null)
+                tbExposure.Text = device.ExposureTime.ToString();
+        }
+
+        private void UpdateCameraControls()
+        {
+            bool cameraReady = camera != null && cbListCamera.Items.Count > 0;
+            btnLive.Enabled = cameraReady;
+            btnSetExposure.Enabled = cameraReady;
+            btnRunOnce.Enabled = cameraReady;
+        }
+        #endregion
+
+        #region Camera Result Events
+        private void VisionControl_UserResultAvailable(object sender,
+            VisionControl.VisionControlUserResultAvailableEventArgs e)
+        {
+            if (IsDisposed || !IsHandleCreated)
+                return;
+
+            MethodInvoker update = delegate
+            {
+                lbProgramStatus.Text = string.Format("{0}: {1}", e.JobName, e.JobStatus);
+            };
+
+            if (InvokeRequired)
+                BeginInvoke(update);
+            else
+                update();
+        }
+        #endregion
+
+        #region Tab Program
+        private void btnRunOnce_Click(object sender, EventArgs e)
+        {
+            int cameraIndex = cbListCamera.SelectedIndex;
+            if (camera == null || cameraIndex < 0 || cameraIndex >= 3 || !camera.mCamera[cameraIndex].isConnect)
+            {
+                MessageBox.Show("Select a connected camera first.", "Program", MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            camera.RunOnce(cameraIndex);
+        }
+
+        private void btnTest_Click(object sender, EventArgs e)
+        {
+            if (job == null)
+                return;
+
+            try
+            {
+                job.Run();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "Program test failed", MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private void btnSaveToolBlock_Click(object sender, EventArgs e)
+        {
+            if (job == null)
+                return;
+
+            using (var dialog = new SaveFileDialog())
+            {
+                dialog.Filter = "Insnex ToolBlock (*.tolb)|*.tolb";
+                dialog.DefaultExt = "tolb";
+                dialog.AddExtension = true;
+                dialog.FileName = "Program.tolb";
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                    return;
+
+                try
+                {
+                    SaveToolBlock(job, dialog.FileName);
+                    MessageBox.Show("Program saved.", "Program", MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message, "Save failed", MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
+            }
+        }
+        #endregion
+
+        #region Tab Others
+        #endregion
+
+        #region Supporter
+        private void SetEditorSubject(InsToolBlock toolBlock)
+        {
+            PropertyInfo subject = insToolBlockEditor1.GetType().GetProperty("Subject",
+                BindingFlags.Instance | BindingFlags.Public);
+            if (subject != null && subject.CanWrite && subject.PropertyType.IsInstanceOfType(toolBlock))
+                subject.SetValue(insToolBlockEditor1, toolBlock, null);
+        }
+
+        private static void SaveToolBlock(InsToolBlock toolBlock, string path)
+        {
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type[] types;
+                try
+                {
+                    types = assembly.GetTypes();
+                }
+                catch (ReflectionTypeLoadException ex)
+                {
+                    types = ex.Types.Where(type => type != null).ToArray();
+                }
+
+                foreach (Type type in types)
+                {
+                    if (type.Name != "InsUtils")
+                        continue;
+
+                    MethodInfo[] methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static);
+                    foreach (MethodInfo method in methods)
+                    {
+                        if (method.Name != "SaveObjectToFile")
+                            continue;
+
+                        ParameterInfo[] parameters = method.GetParameters();
+                        if (parameters.Length != 2)
+                            continue;
+
+                        object[] arguments = new object[2];
+                        bool hasPath = false;
+                        bool hasToolBlock = false;
+                        for (int i = 0; i < parameters.Length; i++)
+                        {
+                            if (parameters[i].ParameterType == typeof(string))
+                            {
+                                arguments[i] = path;
+                                hasPath = true;
+                            }
+                            else if (parameters[i].ParameterType.IsInstanceOfType(toolBlock))
+                            {
+                                arguments[i] = toolBlock;
+                                hasToolBlock = true;
+                            }
+                        }
+
+                        if (hasPath && hasToolBlock)
+                        {
+                            method.Invoke(null, arguments);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            throw new MissingMethodException("The loaded InsWorks SDK does not provide a compatible InsUtils.SaveObjectToFile method.");
+        }
+        #endregion
+    }
+}

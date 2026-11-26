@@ -1,0 +1,799 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Diagnostics;
+using System.Drawing;
+using System.Globalization;
+using System.Linq;
+using System.Resources;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace HK_Inspection
+{
+    public partial class FormRun : Form
+    {
+        public bool manualTrigger;
+
+        public partial class frmSetting : Form // khởi tạo các đối tượng cần thiết và thiết lập giao diện ban đầu, bao gồm danh sách cam và danh sách đầu đọc
+        {
+            
+            Camera _camera;
+            
+            Utility _utility;
+            FormLoading _loading;
+            VisionControl _visionControl; // một kiểu truyền dữ liệu qua contrucutor, giúp giảm phụ thuộc và dễ dàng kiểm thử
+
+            
+            public string ModelSetting = "";
+
+            CogToolBlock checkpoint; // điểm kiểm tra trong quy trình xử lí ảnh
+
+            #region Form Events
+            public frmSetting(Camera camera, PLCOmron plc, FormLoading loading, VisionControl visionControl, DataMan dataMan)
+            {
+                _camera = camera;
+                _dataMan = dataMan;
+                _plc = plc;
+                _loading = loading;
+                _utility = new Utility(); // khởi tạo đối tượng tiện ích mới( khác với các đôi tượng khác được truyền vào)
+                _visionControl = visionControl;
+
+                InitializeComponent();// gọi hàm từ file designer.cs để khởi tạo các thành phần giao diện, đây là phương thức tự động sinh ra khi b kéo thả control trong designer , không nên chỉnh sửa thủ công
+
+                this.pictureBoxImage.AutoFit = true; // thuộc tính autoFit cho ảnh để tự động điều chỉnh kích thước với control, thuộc tính này của CogRecorđisplay
+                try // bọc lại code để bắt lỗi nếu truy cập camera hoặc reader thất bại
+                {
+                    for (int i = 0; i < _camera.numAcqs.Count; i++)
+                    {
+                        string SN = _camera.mCamera[i].mAcqFifo.FrameGrabber.SerialNumber;// lấy số serial của cam thứ i
+
+                        if (SN == _loading.CAM_SN[0]) // so sánh số serial SN vvoiws mảng _loading.Cam_Sn được cấu hinh từ lớp _loafding để thêm tên cam vào cbListCamera
+                        {
+                            cbListCamera.Items.Add("CAM1");// thêm từng mục vào danh sách dropdown của combobox
+                        }
+                        else if (SN == _loading.CAM_SN[1])
+                        {
+                            cbListCamera.Items.Add("CAM2");
+                        }
+                        else if (SN == _loading.CAM_SN[2])
+                        {
+                            cbListCamera.Items.Add("CAM3");
+                        }
+                        else if (SN == _loading.CAM_SN[3])
+                        {
+                            cbListCamera.Items.Add("CAM4");
+                        }
+                    }
+                    UpdateReaderList();// gọi hàm để cập nhật danh sách reader được định nghĩa riêng
+
+                }
+
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.ToString());
+                }
+
+                SetLanguage();
+            }
+
+            public void UpdateReaderList()// cập nhật danh sách reader
+            {
+                for (int i = 0; i < _dataMan.numDMR; i++)
+                {
+                    string IP = _dataMan.GetIPAdress(_dataMan.mReader[i].mSystem);
+
+                    if (IP == _loading.DMR_IP[0])
+                    {
+                        cbListReader.Items.Add("READER 1");
+                    }
+                    else if (IP == _loading.DMR_IP[1])
+                    {
+                        cbListReader.Items.Add("READER 2");
+                    }
+                    else if (IP == _loading.DMR_IP[2])
+                    {
+                        cbListReader.Items.Add("READER 3");
+                    }
+                    else if (IP == _loading.DMR_IP[3])
+                    {
+                        cbListReader.Items.Add("READER 4");
+                    }
+                }
+
+            }
+            private void frmSetting_Load(object sender, EventArgs e)// xử lí khi form loading được tải, khởi taoh giao diện và đăng kí các sự kiện
+            {
+                List<string> toolblockNames = new List<string>(); // thu thập tên từ các CogToolBlocck từ _loaafding._toolBlockManager
+                foreach (CogToolBlock toolblock in _loading._toolBlockManager)
+                {
+                    toolblockNames.Add(toolblock.Name);
+                }
+                cbListToolBlock.DataSource = toolblockNames; // gán danh sách cbListToolBlock thoonbg qua dataSource
+                cbListSpecs.DataSource = toolblockNames;
+
+                dimensionSpecUC1.groupName.Text = "D1";
+                dimensionSpecUC2.groupName.Text = "D2";
+                dimensionSpecUC3.groupName.Text = "D3";
+                dimensionSpecUC4.groupName.Text = "D4";
+                dimensionSpecUC5.groupName.Text = "D5";
+                dimensionSpecUC6.groupName.Text = "D6";
+
+                dimensionSpecUC1.DimensionSpecChanged += DimensionSpecUC1_DimensionSpecChanged; // cấu hình user control, đăng kí sự kiện dimensionSpecChanger cho từng UC để xử lí khi thông số thay đổi
+                dimensionSpecUC2.DimensionSpecChanged += DimensionSpecUC2_DimensionSpecChanged;
+                dimensionSpecUC3.DimensionSpecChanged += DimensionSpecUC3_DimensionSpecChanged;
+                dimensionSpecUC4.DimensionSpecChanged += DimensionSpecUC4_DimensionSpecChanged;
+                dimensionSpecUC5.DimensionSpecChanged += DimensionSpecUC5_DimensionSpecChanged;
+                dimensionSpecUC6.DimensionSpecChanged += DimensionSpecUC6_DimensionSpecChanged;
+
+                _camera.VisionImageAvailable += _camera_VisionImageAvailable; // đăng kí sự kiện khi camera cung cấp hình ảnh mới
+                _visionControl.VisionControlUserResultAvailable += _visionControl_VisionControlUserResultAvailable;// khi visioncontrol trả về kết quả
+                _dataMan.ReaderImageAvailable += _dataMan_ReaderImageAvailable;// khi dataman cung cấp hình ảnh từ reader
+
+
+                if (_camera.numAcqs.Count > 0)
+                    cbListCamera.SelectedIndex = 0; // nếu có camera thì choijn mục đầu tiên tr9ong cbListCamera
+
+                if (_dataMan.mReader.Count() > 0)
+                    cbListReader.SelectedIndex = 0;
+
+                tbHistoryDirectory.Text = _loading.historyDirectory;// hiển thị thư mục lịch sử từ loading     
+
+                try
+                {
+                    tbModelSettingg.Text = ModelSetting.ToString(); // hiển thị modelsetting với lỗi nếu có
+                }
+                catch (Exception ex)
+                {
+                    //MessageBox.Show("Model Name is Null");
+                }
+
+            }
+
+
+            #endregion
+
+            #region Camera & Result Events
+            private void _visionControl_VisionControlUserResultAvailable(object sender, VisionControl.VisionControlUserResultAvailableEventArgs e)
+            {
+
+            }
+
+            private void _camera_VisionImageAvailable(object sender, Camera.VinsionImageAvailableEventArgs e) // khi camera gửi ảnh mới thì sau đó mới kích hoạt sự kiện visionControl để xử lí ảnh trong chế độ cài đặt
+            {
+                if (_loading.formState == frmLoading.FormState.SETTING)// chỉ xử lí ảnh nếu frm Loading đang ở trạng thái setting 
+                    _visionControl.StartRunningOnce(e.Image.ToBitmap(), selectedToolBlock, _loading.triggerPosition);// gọi phương thức _visionControl để chạy một lần xử lí ảnh
+                                                                                                                     // tham số  e.Image.ToBitmap() chuyển ảnh từ camerasang bmp để xử lí
+                                                                                                                     // position là vị trí kích hoạt từ frmLoading, là thông số định vị trong quá trình kiểm tra
+            }
+            #endregion
+
+            #region Tab PLC
+            private async void btnWrite_Click(object sender, EventArgs e)// ghi dữ liệu từ tbWriteValue vào PLC tại địa chỉ trong tbWriteAdd
+            {
+                try
+                {
+                    string input = _plc.GetWriteValueText(tbWriteValue.Text); // lấy và xử lí giá trị từ textbox qua phương thức của _plc
+                                                                              // ushort
+                    if (input.StartsWith("[") && input.EndsWith("]")) // kiểm tra nếu input là mảng
+                    {
+                        try
+                        {
+                            ushort[] value = input.ToStringArray<ushort>(); // chuyển chuỗi thành mảng, đây là phương thức tùy chỉnh giả định nằm trong _plc 
+
+
+                            //if (isAsync)
+                            await _plc.RenderWriteResult(() => _plc.readWriteNet.WriteAsync(tbWriteAdd.Text, value), tbWriteAdd.Text, input);// ghi mảng vào plc bằng writeAsync bất đồng bộ
+                                                                                                                                             // writeAsync phương thức bất đồng bộ từ readWriteNet trả về task<OperateRessult>
+                                                                                                                                             // HslCommunication là thư viện phổ biến để giao tiếp PLC, readWriteNet là đối tượng chính
+                                                                                                                                             // lamda truyền hàm bất đồng bộ vào RenderWriteResult
+
+
+                            //else
+                            //RenderWriteResult(() => readWriteNet.Write(textBox_write_address.Text, value), button_write_ushort, input);
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show("ushort Data is not corrent: " + input + Environment.NewLine + ex.Message);
+                        }
+                    }
+                    else
+                    {
+                        if (ushort.TryParse(input, out ushort value)) // thử chuyển chuỗi thành ushort
+                        {
+                            //if (isAsync)
+                            await _plc.RenderWriteResult(() => _plc.readWriteNet.WriteAsync(tbWriteAdd.Text, value), tbWriteAdd.Text, input);// ghi giá trị đơn vào PLC
+                                                                                                                                             //else
+                                                                                                                                             //RenderWriteResult(() => readWriteNet.Write(textBox_write_address.Text, value), button_write_ushort, input);
+                        }
+                        else
+                            MessageBox.Show("ushort Data is not corrent: " + input);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.ToString());
+                }
+            }
+
+            private async void btnRead_Click(object sender, EventArgs e) // đọc dữ liệu từ PLC tại địa chỉ trong tbReadAdd và hiển thị lên tbReadValue
+            {
+                btnRead.Enabled = false; // vô hiệu hóa nút read
+                try
+                {
+                    if (tbNumRegister.Text == "1")
+                    {
+                        OperateResult<ushort> read = await _plc.readWriteNet.ReadUInt16Async(tbReadAdd.Text);// nếu chỉ đọc từ một thanh ghi thì độc giá trị ushort từ địa chỉ
+                        PLCUtils.ReadResultRender(read, tbReadAdd.Text, tbReadValue); // hiển thị kết quả trạng thái và giá trị lên tbReadValue
+                    }
+                    else
+                    {
+                        OperateResult<ushort[]> read = await _plc.readWriteNet.ReadUInt16Async(tbReadAdd.Text, ushort.Parse(tbNumRegister.Text));// đọc mảng ushort
+                        PLCUtils.ReadResultRender(read, tbReadAdd.Text, tbReadValue);// hiển thị kết quả( trạng thái và giá trị) lên tbReadValue
+                    }
+                    btnRead.Enabled = true; // hoàn tất thì bật true lại
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.ToString());
+                }
+            }
+            #endregion
+
+            #region Tab Camera
+            private void btnLive_Click(object sender, EventArgs e) // live camera
+            {
+                if (btnLive.Text == "LIVE")
+                {
+                    btnLive.BackColor = Color.Red;
+                    if (cbListCamera.SelectedIndex != -1)
+                    {
+                        _camera.ISLIVE[cbListCamera.SelectedItem.ToString()] = true;
+                        try
+                        {
+                            _camera.SetupRunContinuos(cbListCamera.SelectedIndex);
+                            pictureBoxImage.StartLiveDisplay(_camera.mCamera[cbListCamera.SelectedIndex].mAcqFifo);
+                        }
+                        catch (Exception ex)
+                        {
+
+                            MessageBox.Show(ex.ToString());
+                        }
+
+                        _utility.SetControlPropertyThreadSafe(btnLive, "Text", "STOP LIVE");
+                        SettingTabControl.ItemSize = new Size(0, 32);
+                        cbListCamera.Enabled = false;
+                        //_mFrmMain.EnabledButton(true, true, false);
+                    }
+                    else
+                    {
+                        MessageBox.Show("Please select camera");
+                    }
+                }
+                else if (btnLive.Text == "STOP LIVE")
+                {
+                    _camera.ISLIVE[cbListCamera.SelectedItem.ToString()] = false;
+                    try
+                    {
+                        pictureBoxImage.StopLiveDisplay();
+                        //pictureBoxImage.Image = null;
+                        if (Convert.ToInt32(tbExposure.Text) > 0 && Convert.ToInt32(tbExposure.Text) < 501)
+                        {
+                            SetExposureCamera(cbListCamera.SelectedIndex, tbExposure.Text);
+                        }
+                        else
+                        {
+                            MessageBox.Show("Exposure Time: 1 => 500");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(ex.ToString());
+                    }
+                    _utility.SetControlPropertyThreadSafe(btnLive, "Text", "LIVE");
+                    btnLive.BackColor = Color.Gainsboro;
+                    SettingTabControl.ItemSize = new Size(250, 32);
+                    pictureBoxImage.Image = null;
+                    cbListCamera.Enabled = true;
+                    //_mFrmMain.EnabledButton(true, false, false);
+                }
+            }
+
+            private void tbExposure_TextChanged(object sender, EventArgs e)// xử lí sự kiệ khi văn bản trong textBox tbExpossure thay đổi, cập nhật thời gian phơi sáng cho camera được chọn                                                                
+            {
+                if (cbListCamera.SelectedIndex != -1)// đảm bảo 1 cam đã được chọn thì sẽ gọi hàm set exposureCamera
+                    SetExposureCamera(cbListCamera.SelectedIndex, tbExposure.Text);
+            }
+
+            private void btnSetExposure_Click(object sender, EventArgs e)// xử lí sự kiện khi nhấn nút set exposure để gắn giá trị từ tbexposure vào một đầu cụ thể trong cogtoolblock
+            {
+                int sequence = cbSequence.SelectedIndex + 1; // lấy chỉ số từ cbSenqence và công lên 1 để bắt đầu từ 1
+                string inputName = "Exposure" + sequence.ToString(); // tạo tên đầu vào dựa vào senquence
+                MappingToolBlockExposure(cbListCamera.SelectedIndex, inputName, tbExposure.Text);// gọi hàm chưa định nghĩa để ánh xạ giá trị exposuure vào cogtoolbloc của camera được chọn
+
+                //checkpoint.Inputs["Exposure"].Value = Convert.ToInt32(tbExposure.Text);
+                //int exp = Convert.ToInt32(tbExposure.Text);
+                //if (cbListCamera.SelectedIndex == 0)
+                //{
+                //    _loading._toolBlockManager[0].Inputs[inputName].Value = exp;
+                //    _loading._toolBlockManager[4].Inputs[inputName].Value = exp;
+                //}
+                //else if (cbListCamera.SelectedIndex == 1)
+                //{
+                //    _loading._toolBlockManager[1].Inputs[inputName].Value = exp;
+                //    _loading._toolBlockManager[5].Inputs[inputName].Value = exp;
+                //}
+                //else if (cbListCamera.SelectedIndex == 2)
+                //{
+                //    _loading._toolBlockManager[2].Inputs[inputName].Value = exp;
+                //    _loading._toolBlockManager[6].Inputs[inputName].Value = exp;
+                //}
+                //else if (cbListCamera.SelectedIndex == 3)
+                //{
+                //    _loading._toolBlockManager[3].Inputs[inputName].Value = exp;
+                //    _loading._toolBlockManager[7].Inputs[inputName].Value = exp;
+                //}
+
+            }
+
+            private void MappingToolBlockExposure(int deviceIndex, string inputName, string val) // gắn giá trị exposure vào hai cogtoolblock tương ứng với chỉ số thiêt bị
+            {
+                if (IsNumberOnly(val)) // nếu val là số
+                {
+                    int exp = Convert.ToInt32(val);
+                    if (deviceIndex == 0)
+                    {
+                        _loading._toolBlockManager[0].Inputs[inputName].Value = exp; // gắn cùng giá trị cho cặp toolblock 0-4, input là tập hợp tham số của cogtoolblock dùng để cấu hình exposure
+                        _loading._toolBlockManager[4].Inputs[inputName].Value = exp;
+                    }
+                    else if (deviceIndex == 1)
+                    {
+                        _loading._toolBlockManager[1].Inputs[inputName].Value = exp;
+                        _loading._toolBlockManager[5].Inputs[inputName].Value = exp;
+                    }
+                    else if (deviceIndex == 2)
+                    {
+                        _loading._toolBlockManager[2].Inputs[inputName].Value = exp;
+                        _loading._toolBlockManager[6].Inputs[inputName].Value = exp;
+                    }
+                    else if (deviceIndex == 3)
+                    {
+                        _loading._toolBlockManager[3].Inputs[inputName].Value = exp;
+                        _loading._toolBlockManager[7].Inputs[inputName].Value = exp;
+                    }
+                }
+            }
+
+            private void cbListCamera_SelectedIndexChanged(object sender, EventArgs e) // cập nhật exposure khi thay đổi cam hoặc senquence
+                                                                                       // logic là gọi hàm refreshCameraExposure để lấy và hiển thị exposure từ cogtoolblock
+            {
+                RefreshCameraExposure();
+                //for (int i = 0; i < cbListCamera.Items.Count; i++)
+                //{
+                //    if(i == cbListCamera.SelectedIndex)
+                //    {
+                //        int exp = (int)_loading._toolBlockManager[2*i].Inputs["Exposure"].Value;
+                //        tbExposure.Text = exp.ToString();
+                //        SetExposure(i, exp);
+                //    }        
+                //}
+                //int pos = _loading.triggerPosition + 1;
+
+                //int i = cbListCamera.SelectedIndex;
+                //int sequence = cbSequence.SelectedIndex + 1;
+                //if (sequence == 1 || sequence == 2)
+                //{
+                //    int exp = (int)_loading._toolBlockManager[i].Inputs["Exposure" + sequence.ToString()].Value;
+                //    SetExposureCamera(i, exp.ToString());
+                //    tbExposure.Text = exp.ToString();
+                //}
+            }
+            private void cbSequence_SelectedIndexChanged(object sender, EventArgs e)
+            {
+                RefreshCameraExposure();
+            }
+
+            private void RefreshCameraExposure()// lấy exposure từ toolblock dựa trên camera và sequence áp dụng cho camera và textbox
+            {
+                try
+                {
+                    int i = cbListCamera.SelectedIndex;
+                    int sequence = cbSequence.SelectedIndex + 1;
+                    int exp = (int)_loading._toolBlockManager[i].Inputs["Exposure" + sequence.ToString()].Value;
+                    SetExposureCamera(i, exp.ToString());
+                    tbExposure.Text = exp.ToString();
+                }
+                catch (Exception)
+                {
+                    MessageBox.Show("Failed to set camera exposure");
+                }
+            }
+
+            private void ckbLED1_CheckedChanged(object sender, EventArgs e) // chức năng bật tắt led thông qua _loading.ledControl với logic là truyền số led và trạng thái true false khi checkbox thay đổi
+            {
+                if (ckbLED1.Checked == true)
+                    _loading.LedControl(1, true);
+                else _loading.LedControl(1, false);
+            }
+
+            private void ckbLED2_CheckedChanged(object sender, EventArgs e)
+            {
+                if (ckbLED2.Checked == true)
+                    _loading.LedControl(2, true);
+                else _loading.LedControl(2, false);
+            }
+
+            private void ckbLED3_CheckedChanged(object sender, EventArgs e)
+            {
+                if (ckbLED3.Checked == true)
+                    _loading.LedControl(3, true);
+                else _loading.LedControl(3, false);
+            }
+
+            private void ckbLED4_CheckedChanged(object sender, EventArgs e)
+            {
+                if (ckbLED4.Checked == true)
+                    _loading.LedControl(4, true);
+                else _loading.LedControl(4, false);
+
+            }
+            #endregion
+
+            #region Tab Program : quản lí chạy và lưu toolblock
+            private void bntRunOnce_Click(object sender, EventArgs e)// chạy camera 1 lần dựa trên selectedToolBlock
+            {
+                int camId = 0; // ánh xạ selectedToolBlock(0-7) sang camId(0-3) sau đó gọi _camera.RunOne để chụp ảnh
+
+                if (selectedToolBlock == 0 || selectedToolBlock == 4)
+                { camId = 0; }
+                else if (selectedToolBlock == 1 || selectedToolBlock == 5)
+                { camId = 1; }
+                else if (selectedToolBlock == 2 || selectedToolBlock == 6)
+                { camId = 2; }
+                else if (selectedToolBlock == 3 || selectedToolBlock == 7)
+                { camId = 3; }
+
+                _camera.RunOnce(camId);
+            }
+
+            private void btSaveToolBlock_Click(object sender, EventArgs e)
+            {
+                SaveJob();// gọi hàm lưu ảnh
+                          //MessageBox.Show("Program Saved", "Notify", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+
+            private void SaveJob()// lưu tệp job(.vpp) chứa cấu hình cogtoolblock
+            {
+                try
+                {
+                    string path = Path.Combine(_loading.modelDirectory, _loading.modelName, "Program.vpp");// path.combine dùng để ghép chuỗi đường dẫn 1 cách an toàn
+                    _utility.SaveJobFile(path, _loading.job);// hàm _utility.SaveJobFile để lưu _loading.job
+                    MessageBox.Show("Save Job successful");
+
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.ToString(), "Save Job Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+
+            private void btnTest_Click(object sender, EventArgs e)
+            {
+                _loading._toolBlockManager[selectedToolBlock].Run();
+            }
+            private void btnShowProgramTB_Click(object sender, EventArgs e)// hiển thị job trong control cogToolBlockEditV21
+            {
+                cogToolBlockEditV21.Subject = _loading.job;// gắn _loading.Job vào subject để xem, chỉnh sửa giao diện
+            }
+
+            int selectedToolBlock = 0;
+            private void cbListToolBlock_SelectedIndexChanged(object sender, EventArgs e) // cập nhật khi người dùng chọn toolBlock khác trong cbListToolBlock
+            {
+                if (cbListToolBlock.SelectedIndex != -1)// nếu cbList tồn tại
+                {
+                    try
+                    {
+                        selectedToolBlock = cbListToolBlock.SelectedIndex; // gắn selectedToolBlock từ selectedIndex
+                        if (cbListSpecs.Items.Count > 0)
+                            cbListSpecs.SelectedIndex = selectedToolBlock;// đồng bộ cblistSpecs nếu số lượng mục>0
+
+                        LoadToolBlockDimension(cbListToolBlock.SelectedItem.ToString());// hàm loadToolBlockDimension được gọi để tải thông số
+
+
+                        //UpdateDimensionOnSpecTab();
+
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(ex.ToString(), "Warning",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning); ;
+                    }
+                }
+            }
+
+            Dictionary<string, double> dimSpecs;
+            private void LoadToolBlockDimension(string toolName) // tải thông số D1-D6 từ cogtoolBlock vào dímpecsArr
+
+
+            {
+                for (int i = 0; i < _loading._toolBlockManager.Count; i++)
+                {
+                    if (_loading._toolBlockManager[i].Name == toolName)
+                    {
+                        checkpoint = (CogToolBlock)_loading._toolBlockManager[i];// tìm toolBlock theo toolName, gắn vào checkpoint
+                        cogToolBlockEditV21.Subject = checkpoint; // hiển thị trong cogToolBlockEditV21
+
+                        /*1238
+                        dimSpecsArr = new DimensionSpecs[6];
+                        for (int k = 1; k <= 6; k++)
+                        {
+                            DimensionSpecs dimensionSpecs = new DimensionSpecs();
+                            dimSpecs = new Dictionary<string, double>();
+                            dimSpecs = checkpoint.Inputs["DimSpecs"].Value as Dictionary<string, double>;
+
+                            dimSpecs.TryGetValue("D" + k.ToString() + "UpLimit", out double uplimit);
+                            dimensionSpecs.UpLimit = uplimit;
+
+                            dimSpecs.TryGetValue("D" + k.ToString() + "DownLimit", out double downlimit);
+                            dimensionSpecs.DownLimit = downlimit;
+
+                            dimSpecs.TryGetValue("D" + k.ToString() + "Offset", out double offset);
+                            dimensionSpecs.Offset = offset;
+
+                            dimensionSpecs.Value = (double)checkpoint.Outputs["D" + k.ToString()].Value;
+
+                            dimSpecsArr[k-1] = dimensionSpecs;
+                        }
+                        */
+                    }
+                }
+            }
+
+            private void UpdateDimensionOnSpecTab() // cập nhật UI của 6 user Control từ dimSpecsArr
+            {
+                dimensionSpecUC1.dimSpecs = dimSpecsArr[0];
+                dimensionSpecUC1.UpdateUI();
+
+                dimensionSpecUC2.dimSpecs = dimSpecsArr[1];
+                dimensionSpecUC2.UpdateUI();
+
+                dimensionSpecUC3.dimSpecs = dimSpecsArr[2];
+                dimensionSpecUC3.UpdateUI();
+
+                dimensionSpecUC4.dimSpecs = dimSpecsArr[3];
+                dimensionSpecUC4.UpdateUI();
+
+                dimensionSpecUC5.dimSpecs = dimSpecsArr[4];
+                dimensionSpecUC5.UpdateUI();
+
+                dimensionSpecUC6.dimSpecs = dimSpecsArr[5];
+                dimensionSpecUC6.UpdateUI();
+            }
+            #endregion
+
+            #region Tab Specs : cấu hình và lưu thông số kiểm tra (D1-D6)
+            private void btnSaveSpecs_Click(object sender, EventArgs e) // lưu thông số từ D1-D6 từ dimSpecsArr vào dimSpecs, cập nhật CogtoolBlock, chạy thử và lưu job
+            {
+                try
+                {
+                    for (int k = 1; k <= 6; k++) // duyệt qua từ D1-D6, gắn Uplimit, DownLimit, Offset từ dimSpecsArr vào dimSpecs
+                    {
+                        dimSpecs["D" + k.ToString() + "UpLimit"] = dimSpecsArr[k - 1].UpLimit;
+                        dimSpecs["D" + k.ToString() + "DownLimit"] = dimSpecsArr[k - 1].DownLimit;
+                        dimSpecs["D" + k.ToString() + "Offset"] = dimSpecsArr[k - 1].Offset;
+                    }
+                    checkpoint.Inputs["DimSpecs"].Value = dimSpecs; // cập nhật checkpoint.Input["DimSpecs"] vào dimSpecs
+                    checkpoint.Run();// chạy để kiểm tra cấu hình
+                    SaveJob(); // đã định nghĩa từ trước để lưu tệp .vpp
+                    MessageBox.Show("Specs Updated.\r\nProgram Saved.", "Notify", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.ToString(), "Fail to SET Specs", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            private void cbListSpecs_SelectedIndexChanged(object sender, EventArgs e)// đồng bộ cbListSpecs với cbListToolBlock khi chọn toolBlock mới
+            {
+                if (cbListSpecs.SelectedIndex != -1) // nếu cbListSpecs tồn tại
+                {
+                    try
+                    {
+                        selectedToolBlock = cbListSpecs.SelectedIndex;// gắn selectedToolBlock từ cbListSpecs.SelectedIndex
+                        cbListToolBlock.SelectedIndex = selectedToolBlock; // đồng bộ cbListToolBlock
+                                                                           // đảm bảo cho hai combobox hiển thị cung toolblock
+                        /*1238
+                        LoadToolBlockDimension(cbListSpecs.SelectedItem.ToString());
+
+                        UpdateDimensionOnSpecTab();
+                        */
+
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(ex.ToString(), "Failed to load dimension specs",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning); ;
+                    }
+                }
+            }
+            private void DimensionSpecUC6_DimensionSpecChanged(object sender, EventArgs e) // xử lí sự kiện thay đổi thông số trong 6 user control(d1-d6)
+            {
+                ChangeDimensionSpec(sender, 5);// gọi changeDimensionSpecs với chỉ số tương ứng
+            }
+
+            private void DimensionSpecUC5_DimensionSpecChanged(object sender, EventArgs e)
+            {
+                ChangeDimensionSpec(sender, 4);
+            }
+
+            private void DimensionSpecUC4_DimensionSpecChanged(object sender, EventArgs e)
+            {
+                ChangeDimensionSpec(sender, 3);
+            }
+
+            private void DimensionSpecUC3_DimensionSpecChanged(object sender, EventArgs e)
+            {
+                ChangeDimensionSpec(sender, 2);
+            }
+
+            private void DimensionSpecUC2_DimensionSpecChanged(object sender, EventArgs e)
+            {
+                ChangeDimensionSpec(sender, 1);
+            }
+
+            private void DimensionSpecUC1_DimensionSpecChanged(object sender, EventArgs e)
+            {
+                ChangeDimensionSpec(sender, 0);
+            }
+
+            private void ChangeDimensionSpec(object sender, int dimNo)// cập nhật dimSpecsArr dựa trên giá trị NumericUpDown
+                                                                      // ép kiểu sender thành NumricUpDown
+                                                                      // Dự trên Name gắn giá trị vào uplimit, downlimit hoặc offset
+            {
+                NumericUpDown nud = sender as NumericUpDown;// NumericDown là control nhập số với nút tăng giảm
+                string controlName = nud.Name.ToString();
+                double controlVal = (double)nud.Value;
+
+                if (controlName == "nudUpLimit")
+                {
+                    dimSpecsArr[dimNo].UpLimit = controlVal;
+                }
+                else if (controlName == "nudDownLimit")
+                {
+                    dimSpecsArr[dimNo].DownLimit = controlVal;
+                }
+                else if (controlName == "nudOffset")
+                {
+                    dimSpecsArr[dimNo].Offset = controlVal;
+                }
+            }
+            #endregion
+
+            #region Tab Others: điều khiển phụ như mở thư mục lịch sử, bật/tắt mã code
+            private void btnOpenHistoryDialog_Click(object sender, EventArgs e)
+            {
+                Process.Start(_loading.historyDirectory);// process.start dùng để mở 1 tiến trình mới
+            }
+            // khi đườnh dẫn được mở, nó sẽ được mở bằng fileExplorer
+
+            private void ckbUseCodeData_CheckedChanged(object sender, EventArgs e)// khi người dùng tích hoặc bỏ tích ckbUserCodeData thì hệ thống sẽ bật hoặc tắt chế độ dùng dữ liệu mã số
+            {
+                if (ckbUseCodeData.Checked == true)
+                    _loading.useCodeData = true;// nếu được chọn thì bật chế độ dùng dữ liệu mã số
+                else _loading.useCodeData = false;
+            }
+            #endregion
+
+            #region Languages
+            private void SetLanguage()
+            {
+                if (_loading.vietnamese)
+                    ChangeLanguageControl("vi-VN");
+                else ChangeLanguageControl("en-US");
+            }
+
+            CultureInfo culture;
+            public void ChangeLanguageControl(string cultureName)
+            {
+                culture = CultureInfo.CreateSpecificCulture(cultureName);
+                ResourceManager rm = new
+                    ResourceManager("CodeMeasure.Language.LangResource", typeof(frmMain).Assembly);
+
+                tabProgram.Text = rm.GetString("program", culture);
+                tabSpec.Text = rm.GetString("specs", culture);
+                tabOthers.Text = rm.GetString("others", culture);
+
+                btnSetExposure.Text = rm.GetString("save", culture);
+                groupBox1.Text = rm.GetString("lightcontrol", culture);
+                lbExposure.Text = rm.GetString("expose", culture);
+
+                btnSaveToolBlock.Text = rm.GetString("save", culture);
+                btnRunOnce.Text = rm.GetString("runonce", culture);
+
+                btnSaveSpecs.Text = rm.GetString("set", culture);
+
+            }
+
+            #endregion
+
+            #region Supporter
+            private bool IsNumberOnly(string str)// kiểm tra chuỗi str có chứa chỉ số hay k
+            {
+                Regex regex = new Regex(@"^\d+$");// thể hiện chuỗi phải toàn chỉ số từ 0-9
+                return regex.IsMatch(str);// kiểm tra xem có str có khớp với regex k, trả về true nếu chỉ chứa số
+            }
+            private void SetExposureCamera(int index, string value)// setup thời gian phơi sáng cho cam, index là chỉ số cam cần chỉnh, value là giá trị thời gian phơi sáng
+            {
+                if (IsNumberOnly(value))// kiểm tra xem value có chí chứa số hay k
+                    _camera.mCamera[index].mAcqFifo.OwnedExposureParams.Exposure = Convert.ToUInt32(value);// nếu đúng thì mới cập nhật exposure cho cam[index]
+            }
+            private void SetExposureReader(int index, string value)// đặt thời gian phơi sáng cho bộ đọc dữ liệu
+            {
+                if (IsNumberOnly(value))
+                    if (Convert.ToInt32(value) > 5) //min exposure value
+                        _dataMan.SetExposure(index, value);
+            }
+            #endregion
+
+            #region Tab Reader : quản lí đầu đọc
+            private void btnTriggerReader_Click(object sender, EventArgs e)// gửi lệnh trigger
+            {
+                int id = cbListReader.SelectedIndex;
+                if (id != -1)// nếu cbListReader có index để chọn thì kích hoạt trigger
+                    _dataMan.TriggerReader(id);
+            }
+            private void _dataMan_ReaderImageAvailable(object sender, DataMan.ReaderImageAvailableEventArgs e)
+            {
+                pictureBoxDMR.Image = e.Image;// xử lí sự kiện khi reader gửi sau khi đọc
+            }
+
+
+            private void btnSetExposureReader_Click(object sender, EventArgs e) // thiết lập thời gian phơi sáng 
+            {
+                if (cbListReader.SelectedIndex != -1)// nếu đã chọn reader thì gọi mappingToolBlockExxposure với chỉ số reader, tên đàu vào và giá trị tương ứng
+                    MappingToolBlockExposure(cbListReader.SelectedIndex, "Exposure3", tbReaderExposure.Text);
+            }
+            // mappingtoolblickexposure là phơng thức gắn exposure vào cogtoolblock, ứng dụng lưu exposure
+
+
+
+            private void tbReaderExposure_TextChanged(object sender, EventArgs e)
+            {
+                if (cbListReader.SelectedIndex != -1)// cập nhật exposure cho reader tức thì khi giá trị trong tbReaderExposure thay đổi
+                    SetExposureReader(cbListReader.SelectedIndex, tbReaderExposure.Text);
+            }
+
+
+            private void cbListReader_SelectedIndexChanged(object sender, EventArgs e) // cập nhật exposure khi chọn reader mới trong cbListReader
+            {
+                int i = cbListReader.SelectedIndex;
+                int exp = (int)_loading._toolBlockManager[i].Inputs["Exposure3"].Value;
+                SetExposureReader(i, exp.ToString());
+                tbReaderExposure.Text = exp.ToString();
+            }
+
+
+            #endregion
+
+            private void btnSaveModelSetting_Click(object sender, EventArgs e)// lưu tên mô hình từ tbModeSetting khi nhấn nút
+            {
+                if (tbModelSettingg.Text.Contains(" "))
+                {
+                    MessageBox.Show("Model Name error. Please add Model name again");
+                }
+                else MessageBox.Show("Model Name successful");
+                ModelSetting = tbModelSettingg.Text;
+            }
+
+            private void tbModelSettingg_TextChanged_1(object sender, EventArgs e)// cập nhật tên modeName vào tất cả các toolBlock
+            {
+                for (int i = 0; i < _loading._toolBlockManager.Count; i++)
+                {
+                    _loading._toolBlockManager[i].Inputs["ModelName"].Value = tbModelSettingg.Text;
+                }
+            }
+        }
+    }
+}

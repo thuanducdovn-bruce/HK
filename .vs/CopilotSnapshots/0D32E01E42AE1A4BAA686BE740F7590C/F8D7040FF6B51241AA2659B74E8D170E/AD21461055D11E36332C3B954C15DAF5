@@ -1,0 +1,198 @@
+﻿//using Cognex.VisionPro;
+//using Cognex.VisionPro.Exceptions;
+using System;
+using System.Collections.Generic;
+using Insnex.AcqFifo;
+using Insnex.Vision2D;
+using Insnex.Vision2D.Core;
+using Insnex.VisionCore;
+namespace HK_Inspection
+{
+    public class Camera
+    {
+        public struct CAMERA
+        {
+            public InsAcqFifo mAcqFifo { get; set; }
+            
+            public bool isConnect { get; set; }
+
+            public bool ImageReadyFlag { get; set; }
+
+        }
+        public Dictionary<string, bool> ISLIVE = new Dictionary<string, bool>();
+
+        public Dictionary<string, int> numAcqs = new Dictionary<string, int>();
+        //public ICogFrameGrabber mFrameGrabber = null;
+
+        //public Dictionary<string, int> numAcqs = new Dictionary<string, int>();
+
+        public class VinsionImageAvailableEventArgs
+        {
+            public string Index;
+            public IInsImage Image;
+            
+            public bool ISLIVE;
+
+            public VinsionImageAvailableEventArgs(string index, IInsImage image, bool isLive)
+            {
+                Index = index;
+                Image = image;
+                ISLIVE = isLive;
+            }
+        }
+
+        public delegate void VisionImageAvailableEventHandler(object sender, VinsionImageAvailableEventArgs e);
+        public event VisionImageAvailableEventHandler VisionImageAvailable = null;
+        public CAMERA[] mCamera = new CAMERA[3];
+        public Camera()
+        {
+            DeviceListAcq();
+            //SetupOutput();
+        }
+
+        private void DeviceListAcq()
+        {
+            numAcqs.Clear();
+            try
+            {
+                // Step 1 - Create the CogFrameGrabbers
+                CogFrameGrabbers mFrameGrabbers = new CogFrameGrabbers();
+                if (mFrameGrabbers.Count < 1)
+                    throw new CogAcqNoFrameGrabberException("No frame grabbers found");
+
+                // Step 2 - Select the first frame grabber even if there is more than one.
+                for (int i = 0; i < mFrameGrabbers.Count; i++)
+                {
+                    var mFrameGrabber = mFrameGrabbers[i];
+                    var cameraName = mFrameGrabber.SerialNumber;
+                    // Display the board type
+                    //if (mFrameGrabber.SerialNumber.Contains(Properties.Settings.Default.SNTopCam))
+                    //{
+                    //     cameraName = "TopCam - " + mFrameGrabber.SerialNumber;
+                    //}
+                    //else if (mFrameGrabber.SerialNumber.Contains(Properties.Settings.Default.SNBotCam))
+                    //{
+                    //     cameraName = "BotCam - " + mFrameGrabber.SerialNumber;
+                    //}
+                    var list = mFrameGrabber.AvailableVideoFormats;
+                    var cameraFormat = mFrameGrabber.AvailableVideoFormats[0];
+                    mCamera[i].mAcqFifo = mFrameGrabber.CreateAcqFifo(cameraFormat,
+                    CogAcqFifoPixelFormatConstants.Format8Grey, 0, true);
+
+                    //mCamera[i].mAcqFifo.OwnedExposureParams.Exposure =  5;
+                    mCamera[i].isConnect = true;
+                    numAcqs.Add(cameraName, 0);
+                    ISLIVE.Add(cameraName, false);
+                    mCamera[i].mAcqFifo.Complete += Camera_Complete;
+                }
+            }
+            catch (CogAcqException)
+            {
+                mCamera = null;
+            }
+        }
+
+        private void Camera_Complete(object sender, CogCompleteEventArgs e)
+        {
+            int numReadyVal, numPendingVal;
+            bool busyVal;
+
+            var AcqFifo = (ICogAcqFifo)sender;
+
+            CogAcqInfo info = new CogAcqInfo();
+
+            try
+            {
+                AcqFifo.GetFifoState(out numPendingVal, out numReadyVal, out busyVal);
+                if (numReadyVal > 0)
+                {
+                    numAcqs[AcqFifo.FrameGrabber.SerialNumber] += 1;
+                    var Image = AcqFifo.CompleteAcquireEx(info);
+                    if (VisionImageAvailable != null)
+                        VisionImageAvailable(this, new VinsionImageAvailableEventArgs(AcqFifo.FrameGrabber.SerialNumber, Image, ISLIVE[AcqFifo.FrameGrabber.SerialNumber]));
+                }
+
+                if (numAcqs[AcqFifo.FrameGrabber.SerialNumber] >= 4)
+                {
+                    GC.Collect();
+                    numAcqs[AcqFifo.FrameGrabber.SerialNumber] = 0;
+                }
+            }
+            catch (CogException)
+            {
+            }
+        }
+
+        public void SetupRunContinuos(int Index)
+        {
+            try
+            {
+                mCamera[Index].mAcqFifo.OwnedTriggerParams.TriggerModel = CogAcqTriggerModelConstants.Manual;
+                mCamera[Index].mAcqFifo.OwnedTriggerParams.TriggerEnabled = true;
+                ISLIVE[mCamera[Index].mAcqFifo.FrameGrabber.SerialNumber] = true;
+            }
+            catch { }
+        }
+        public void SetupRunOnce(int Index)
+        {
+            try
+            {
+                mCamera[Index].mAcqFifo.OwnedTriggerParams.TriggerModel = CogAcqTriggerModelConstants.Manual;
+                mCamera[Index].mAcqFifo.OwnedTriggerParams.TriggerEnabled = true;
+                //ISLIVE[mCamera[Index].mAcqFifo.FrameGrabber.SerialNumber] = false;
+            }
+            catch { }
+        }
+
+        public void SetupRunExternalTrigger(int Index)
+        {
+            try
+            {
+                mCamera[Index].mAcqFifo.OwnedTriggerParams.TriggerModel = CogAcqTriggerModelConstants.Auto;
+                mCamera[Index].mAcqFifo.OwnedTriggerParams.TriggerLowToHigh = true;
+                mCamera[Index].mAcqFifo.OwnedTriggerParams.TriggerEnabled = true;
+            }
+            catch { }
+        }
+        public void RunOnce(int Index)
+        {
+            mCamera[Index].mAcqFifo.StartAcquire();
+            //StopTriggerImage(Index);
+        }
+
+
+        public void DestroyCamera(int index)
+        {
+            mCamera[index].mAcqFifo.FrameGrabber.Disconnect(false);
+        }
+
+        public void SetupOutput()
+        {
+            for (int index = 0; index < mCamera.Length; index++)
+            {
+                if (mCamera[index].isConnect == true)
+                {
+                    mCamera[index].mAcqFifo.FrameGrabber.OwnedGigEAccess.SetFeature("LineSelector", "Out1");
+                    mCamera[index].mAcqFifo.FrameGrabber.OwnedGigEAccess.SetFeature("LineSource", "UserOutput");
+                    mCamera[index].mAcqFifo.FrameGrabber.OwnedGigEAccess.SetFeature("UserOutputSelector", "UserOutput1");
+                }
+            }
+        }
+
+        public void SetOutputHigh(int index)
+        {
+            mCamera[index].mAcqFifo.FrameGrabber.OwnedGigEAccess.SetFeature("UserOutputValue", "1");
+        }
+
+        public void SetOutputLow(int index)
+        {
+            mCamera[index].mAcqFifo.FrameGrabber.OwnedGigEAccess.SetFeature("UserOutputValue", "0");
+        }
+        public void SetGevSCPD(int index)
+        {
+            mCamera[index].mAcqFifo.FrameGrabber.OwnedGigEAccess.SetFeature("GevSCPD", "10000");
+        }
+
+    }
+
+}

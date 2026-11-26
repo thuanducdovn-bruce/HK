@@ -1,0 +1,301 @@
+﻿using System;
+using System.Collections;
+using System.Reflection;
+using System.Windows.Forms;
+using Insnex.Vision2D;
+using Insnex.Vision2D.Controls;
+using Insnex.Vision2D.Core;
+using HK_Inspection.UserControls;
+
+namespace HK_Inspection
+{
+    public partial class FormRun : Form
+    {
+        private const int CameraCount = 3;
+        private const int PositionsPerCamera = 2;
+
+        private Camera camera;
+        private VisionControl visionControl;
+        private FormMain mainForm;
+        private volatile int triggerPosition = 1;
+        private readonly IInsImage[,] logImageArr = new IInsImage[CameraCount, PositionsPerCamera];
+        private readonly CheckGlassInfors[] glassResults = new CheckGlassInfors[CameraCount * PositionsPerCamera];
+        private readonly CheckGlassUC[] glassControls;
+
+        public bool manualTrigger;
+
+        public FormRun()
+        {
+            InitializeComponent();
+            glassControls = new[]
+            {
+                checkGlassUC1, checkGlassUC2, checkGlassUC3,
+                checkGlassUC4, checkGlassUC5, checkGlassUC6
+            };
+            for (int i = 0; i < glassResults.Length; i++)
+                glassResults[i] = new CheckGlassInfors();
+
+            Load += FormRun_Load;
+            FormClosed += FormRun_FormClosed;
+        }
+
+        public void Initialize(Camera camera, VisionControl visionControl, FormMain mainForm)
+        {
+            DetachEvents();
+            this.camera = camera;
+            this.visionControl = visionControl;
+            this.mainForm = mainForm;
+
+            if (camera != null)
+                camera.VisionImageAvailable += Camera_VisionImageAvailable;
+            if (visionControl != null)
+                visionControl.VisionControlUserResultAvailable += VisionControl_UserResultAvailable;
+            if (mainForm != null)
+            {
+                mainForm.TriggerP1 += MainForm_TriggerP1;
+                mainForm.TriggerP2 += MainForm_TriggerP2;
+            }
+        }
+
+        #region Form Event
+        private void FormRun_Load(object sender, EventArgs e)
+        {
+            for (int i = 0; i < glassControls.Length; i++)
+            {
+                int cameraNumber = i % CameraCount + 1;
+                int positionNumber = i / CameraCount + 1;
+                glassControls[i].SetTitle(string.Format("CAM {0} - POSITION {1}", cameraNumber, positionNumber));
+                glassControls[i].RecordDisplayDoudlbeClick += Glass_RecordDisplayDoubleClick;
+                glassControls[i].UpdateRecord(glassResults[i]);
+            }
+        }
+
+        private void FormRun_FormClosed(object sender, FormClosedEventArgs e)
+        {
+            DetachEvents();
+        }
+
+        private void MainForm_TriggerP1()
+        {
+            triggerPosition = 1;
+            manualTrigger = true;
+        }
+
+        private void MainForm_TriggerP2()
+        {
+            triggerPosition = 2;
+            manualTrigger = true;
+        }
+        #endregion
+
+        #region Camera Result Events
+        private void Camera_VisionImageAvailable(object sender, Camera.VinsionImageAvailableEventArgs e)
+        {
+            if (camera == null || visionControl == null || e == null || e.Image == null)
+                return;
+
+            int cameraIndex = FindCameraIndex(e.Index);
+            if (cameraIndex < 0)
+                return;
+
+            int requestedPosition = e.TriggerPosition >= 1 && e.TriggerPosition <= PositionsPerCamera
+                ? e.TriggerPosition
+                : triggerPosition;
+            int positionGroup = requestedPosition - 1;
+            int position = cameraIndex + 1 + positionGroup * CameraCount;
+            int glassIndex = position - 1;
+            logImageArr[cameraIndex, positionGroup] = e.Image;
+
+            glassResults[glassIndex] = new CheckGlassInfors();
+            UpdateGlass(glassIndex);
+            visionControl.StartRunningOnce(e.Image, 0, position);
+        }
+
+        private void VisionControl_UserResultAvailable(object sender,
+            VisionControl.VisionControlUserResultAvailableEventArgs e)
+        {
+            if (e == null || e.Position < 1 || e.Position > glassResults.Length)
+                return;
+
+            int glassIndex = e.Position - 1;
+            bool result;
+            bool hasResult = TryGetInspectionResult(e.Result, e.Position, out result);
+            CheckGlassInfors glassResult = new CheckGlassInfors
+            {
+                FinishedFlag = true,
+                HasResult = hasResult,
+                TotalResult = hasResult && result,
+                Records = new[] { e.LastRunRecord },
+                Results = new[] { hasResult && result }
+            };
+            glassResults[glassIndex] = glassResult;
+            UpdateGlass(glassIndex);
+
+            // PLC result outputs are intentionally disabled until the PLC register mapping is defined.
+            // totalResultToPLC and related PLC writes will be added after the mapping is provided.
+        }
+        #endregion
+
+        #region PLC Results
+        /* PLC signals are not currently used.
+        private void WriteResultToPLC(bool totalResultToPLC)
+        {
+        }
+        */
+        #endregion
+
+        #region Excel Logging
+        /* Excel logging is not currently used.
+        private void LogExcel(CheckGlassInfors result)
+        {
+        }
+        */
+        #endregion
+
+        #region Supporter
+        private int FindCameraIndex(string cameraName)
+        {
+            if (camera == null || string.IsNullOrEmpty(cameraName))
+                return -1;
+
+            for (int i = 0; i < CameraCount && i < camera.mCamera.Length; i++)
+            {
+                InsCamera2DHIK device = camera.mCamera[i].Device;
+                if (camera.mCamera[i].isConnect && device != null && device.Name == cameraName)
+                    return i;
+            }
+
+            return -1;
+        }
+
+        private void UpdateGlass(int glassIndex)
+        {
+            if (glassIndex < 0 || glassIndex >= glassControls.Length || IsDisposed || !IsHandleCreated)
+                return;
+
+            MethodInvoker update = delegate
+            {
+                glassControls[glassIndex].UpdateRecord(glassResults[glassIndex]);
+            };
+
+            if (InvokeRequired)
+                BeginInvoke(update);
+            else
+                update();
+        }
+
+        private static bool TryGetInspectionResult(object outputs, int position, out bool result)
+        {
+            result = false;
+            if (outputs == null)
+                return false;
+
+            string[] names =
+            {
+                "Result" + position,
+                "OK" + position,
+                "IsOK" + position,
+                "Pass" + position,
+                "Glass" + position + "Result",
+                "TotalResult",
+                "Result",
+                "OK",
+                "IsOK",
+                "Pass"
+            };
+
+            IDictionary dictionary = outputs as IDictionary;
+            PropertyInfo itemProperty = null;
+            foreach (PropertyInfo property in outputs.GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public))
+            {
+                ParameterInfo[] parameters = property.GetIndexParameters();
+                if (property.Name == "Item" && parameters.Length == 1 && parameters[0].ParameterType == typeof(string))
+                {
+                    itemProperty = property;
+                    break;
+                }
+            }
+
+            foreach (string name in names)
+            {
+                object terminal = null;
+                if (dictionary != null && dictionary.Contains(name))
+                    terminal = dictionary[name];
+                else if (itemProperty != null)
+                {
+                    try
+                    {
+                        terminal = itemProperty.GetValue(outputs, new object[] { name });
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                if (TryReadBoolean(terminal, out result))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryReadBoolean(object value, out bool result)
+        {
+            result = false;
+            if (value is bool)
+            {
+                result = (bool)value;
+                return true;
+            }
+            if (value == null)
+                return false;
+
+            PropertyInfo valueProperty = value.GetType().GetProperty("Value", BindingFlags.Instance | BindingFlags.Public);
+            if (valueProperty != null && valueProperty.PropertyType == typeof(bool))
+            {
+                result = (bool)valueProperty.GetValue(value, null);
+                return true;
+            }
+
+            return false;
+        }
+
+        private void Glass_RecordDisplayDoubleClick(object record)
+        {
+            if (record == null)
+                return;
+
+            var zoomForm = new Form
+            {
+                Text = "Inspection Record",
+                WindowState = FormWindowState.Maximized,
+                StartPosition = FormStartPosition.CenterParent
+            };
+            var recordDisplay = new InsRecordDisplayControl { Dock = DockStyle.Fill };
+            PropertyInfo recordProperty = recordDisplay.GetType().GetProperty("Record",
+                BindingFlags.Instance | BindingFlags.Public);
+            if (recordProperty != null && recordProperty.CanWrite && recordProperty.PropertyType.IsInstanceOfType(record))
+                recordProperty.SetValue(recordDisplay, record, null);
+            zoomForm.Controls.Add(recordDisplay);
+            zoomForm.ShowDialog(this);
+        }
+
+        private void DetachEvents()
+        {
+            if (camera != null)
+                camera.VisionImageAvailable -= Camera_VisionImageAvailable;
+            if (visionControl != null)
+                visionControl.VisionControlUserResultAvailable -= VisionControl_UserResultAvailable;
+            if (mainForm != null)
+            {
+                mainForm.TriggerP1 -= MainForm_TriggerP1;
+                mainForm.TriggerP2 -= MainForm_TriggerP2;
+            }
+
+            camera = null;
+            visionControl = null;
+            mainForm = null;
+        }
+        #endregion
+    }
+}

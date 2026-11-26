@@ -1,0 +1,230 @@
+﻿//using Cognex.VisionPro;
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+using Insnex.Vision2D.Core;
+using MvCamCtrl.NET;
+
+namespace HK_Inspection
+{
+    public class Camera
+    {
+        public struct CAMERA
+        {
+            public InsCamera2DHIK Device { get; set; }  
+            public bool isConnect { get; set; }
+            public bool ImageReadyFlag { get; set; }
+        }
+
+        public ConcurrentDictionary<string, bool> ISLIVE = new ConcurrentDictionary<string, bool>();
+        public ConcurrentDictionary<string, int> numAcqs = new ConcurrentDictionary<string, int>();
+
+        public class VinsionImageAvailableEventArgs
+        {
+            public string Index;
+            public IInsImage Image;
+            public bool ISLIVE;
+            public int TriggerPosition;
+
+            public VinsionImageAvailableEventArgs(string index, IInsImage image, bool isLive,
+                int triggerPosition = 1)
+            {
+                Index = index;
+                Image = image;
+                ISLIVE = isLive;
+                TriggerPosition = triggerPosition;
+            }
+        }
+
+        public delegate void VisionImageAvailableEventHandler(object sender, VinsionImageAvailableEventArgs e);
+        public event VisionImageAvailableEventHandler VisionImageAvailable;
+        public CAMERA[] mCamera = new CAMERA[3];
+
+        public Camera()
+        {
+            DeviceListAcq();
+        }
+
+        private void DeviceListAcq()
+        {
+            numAcqs.Clear();
+            ISLIVE.Clear();
+
+            var deviceList = new MyCamera.MV_CC_DEVICE_INFO_LIST();
+            int result = MyCamera.MV_CC_EnumDevices_NET(
+                MyCamera.MV_GIGE_DEVICE | MyCamera.MV_USB_DEVICE, ref deviceList);
+            if (result != MyCamera.MV_OK || deviceList.nDeviceNum == 0)
+                return;
+
+            int cameraIndex = 0;
+            for (int i = 0; i < deviceList.nDeviceNum && cameraIndex < mCamera.Length; i++)
+            {
+                var deviceInfo = (MyCamera.MV_CC_DEVICE_INFO)Marshal.PtrToStructure(
+                    deviceList.pDeviceInfo[i], typeof(MyCamera.MV_CC_DEVICE_INFO));
+                var camera = new InsCamera2DHIK();
+                string cameraName;
+
+                if (deviceInfo.nTLayerType == MyCamera.MV_GIGE_DEVICE)
+                {
+                    IntPtr infoPointer = Marshal.UnsafeAddrOfPinnedArrayElement(
+                        deviceInfo.SpecialInfo.stGigEInfo, 0);
+                    var gigeInfo = (MyCamera.MV_GIGE_DEVICE_INFO)Marshal.PtrToStructure(
+                        infoPointer, typeof(MyCamera.MV_GIGE_DEVICE_INFO));
+                    camera.Ip = string.Format("{0}.{1}.{2}.{3}",
+                        (gigeInfo.nCurrentIp >> 24) & 0xff,
+                        (gigeInfo.nCurrentIp >> 16) & 0xff,
+                        (gigeInfo.nCurrentIp >> 8) & 0xff,
+                        gigeInfo.nCurrentIp & 0xff);
+                    camera.SerialNumber = gigeInfo.chSerialNumber;
+                    cameraName = camera.SerialNumber;
+                }
+                else if (deviceInfo.nTLayerType == MyCamera.MV_USB_DEVICE)
+                {
+                    IntPtr infoPointer = Marshal.UnsafeAddrOfPinnedArrayElement(
+                        deviceInfo.SpecialInfo.stUsb3VInfo, 0);
+                    var usbInfo = (MyCamera.MV_USB3_DEVICE_INFO)Marshal.PtrToStructure(
+                        infoPointer, typeof(MyCamera.MV_USB3_DEVICE_INFO));
+                    camera.SerialNumber = usbInfo.chSerialNumber;
+                    cameraName = camera.SerialNumber;
+                }
+                else
+                {
+                    continue;
+                }
+
+                camera.Name = cameraName;
+                camera.ConnectCamera();
+                if (!camera.IsConnected)
+                    continue;
+
+                camera.OpenCamera();
+                camera.EnableSoftwareTriggerMode();
+                mCamera[cameraIndex] = new CAMERA { Device = camera, isConnect = true };
+                numAcqs[cameraName] = 0;
+                ISLIVE[cameraName] = false;
+                cameraIndex++;
+            }
+        }
+
+        public void SetupRunContinuos(int index)
+        {
+            var camera = GetCamera(index);
+            if (camera == null)
+                return;
+
+            string name = camera.Name;
+            if (ISLIVE.TryGetValue(name, out bool isLive) && isLive)
+                return;
+
+            camera.LiveImage();
+            ISLIVE[name] = true;
+            Task.Run(() =>
+            {
+                while (ISLIVE.TryGetValue(name, out bool live) && live)
+                {
+                    if (!camera.ImageList.TryDequeue(out IInsImage image))
+                    {
+                        Thread.Sleep(1);
+                        continue;
+                    }
+
+                    numAcqs.AddOrUpdate(name, 1, (key, count) => count + 1);
+                    VisionImageAvailable?.Invoke(this,
+                        new VinsionImageAvailableEventArgs(name, image, true));
+                }
+            });
+        }
+
+        public void SetupRunOnce(int index)
+        {
+            var camera = GetCamera(index);
+            if (camera == null)
+                return;
+
+            string name = camera.Name;
+            if (ISLIVE.TryGetValue(name, out bool isLive) && isLive)
+            {
+                ISLIVE[name] = false;
+                camera.LiveImage();
+            }
+        }
+
+        public void SetupRunExternalTrigger(int index)
+        {
+            var camera = GetCamera(index);
+            if (camera != null)
+                camera.EnableHardwareRisingEdgeTrigger();
+        }
+
+        public void RunOnce(int index)
+        {
+            RunOnce(index, 1);
+        }
+
+        public void RunOnce(int index, int triggerPosition)
+        {
+            if (triggerPosition < 1 || triggerPosition > 2)
+                throw new ArgumentOutOfRangeException("triggerPosition");
+
+            var camera = GetCamera(index);
+            if (camera == null)
+                return;
+
+            Task.Run(() =>
+            {
+                IInsImage image = camera.AcquireOneImage(camera.ExposureTime, 3000);
+                if (image != null)
+                {
+                    numAcqs.AddOrUpdate(camera.Name, 1, (key, count) => count + 1);
+                    VisionImageAvailable?.Invoke(this,
+                        new VinsionImageAvailableEventArgs(camera.Name, image, false, triggerPosition));
+                }
+            });
+        }
+
+        public void DestroyCamera(int index)
+        {
+            var camera = GetCamera(index);
+            if (camera == null)
+                return;
+
+            if (ISLIVE.TryGetValue(camera.Name, out bool isLive) && isLive)
+            {
+                ISLIVE[camera.Name] = false;
+                camera.LiveImage();
+            }
+            camera.CloseCamera();
+            mCamera[index] = default(CAMERA);
+        }
+
+        public void SetupOutput()
+        {
+            throw new NotSupportedException("Output control is not exposed by InsCamera2DHIK.");
+        }
+
+        public void SetOutputHigh(int index)
+        {
+            throw new NotSupportedException("Output control is not exposed by InsCamera2DHIK.");
+        }
+
+        public void SetOutputLow(int index)
+        {
+            throw new NotSupportedException("Output control is not exposed by InsCamera2DHIK.");
+        }
+
+        public void SetGevSCPD(int index)
+        {
+            throw new NotSupportedException("GevSCPD control is not exposed by InsCamera2DHIK.");
+        }
+
+        private InsCamera2DHIK GetCamera(int index)
+        {
+            if (mCamera == null || index < 0 || index >= mCamera.Length || !mCamera[index].isConnect)
+                return null;
+            return mCamera[index].Device;
+        }
+    }
+}

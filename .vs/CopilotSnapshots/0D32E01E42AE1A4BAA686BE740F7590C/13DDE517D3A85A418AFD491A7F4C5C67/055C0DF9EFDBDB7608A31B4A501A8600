@@ -1,0 +1,535 @@
+﻿using Insnex.Vision2D.ToolBlock;
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Diagnostics;
+using System.Drawing;
+using System.Globalization;
+using System.Linq;
+using System.Resources;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace HK_Inspection
+{
+    public partial class FormSetting : Form
+    {
+        //PLCOmron _plc;
+        Camera _camera;
+        Utility _utility;
+        FormLoading _loading;
+        VisionControl _visionControl;
+
+        //List<DimensionSpecs> dimSpecsList = new List<DimensionSpecs>();
+        //DimensionSpecs[] dimSpecsArr;
+
+        InsToolBlock checkpoint;
+        //PVK20241209
+        public string ModelSetting = "";
+        public FormSetting()
+        {
+            InitializeComponent();
+        }
+
+        #region Form Events
+        public frmSetting(Camera camera, PLCOmron plc, frmLoading loading, VisionControl visionControl, DataMan dataMan)
+        {
+            _camera = camera;
+            _dataMan = dataMan;
+            _plc = plc;
+            _loading = loading;
+            _utility = new Utility();
+            _visionControl = visionControl;
+
+            InitializeComponent();
+
+            this.pictureBoxImage.AutoFit = true;
+            try
+            {
+                for (int i = 0; i < _camera.numAcqs.Count; i++)
+                {
+                    string SN = _camera.mCamera[i].mAcqFifo.FrameGrabber.SerialNumber;
+
+                    if (SN == _loading.CAM_SN[0])
+                    {
+                        cbListCamera.Items.Add("CAM1");
+                    }
+                    else if (SN == _loading.CAM_SN[1])
+                    {
+                        cbListCamera.Items.Add("CAM2");
+                    }
+                    else if (SN == _loading.CAM_SN[2])
+                    {
+                        cbListCamera.Items.Add("CAM3");
+                    }
+                    else if (SN == _loading.CAM_SN[3])
+                    {
+                        cbListCamera.Items.Add("CAM4");
+                    }
+                }
+                UpdateReaderList();
+
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.ToString());
+            }
+
+            SetLanguage();
+        }
+
+        public void UpdateReaderList()
+        {
+            for (int i = 0; i < _dataMan.numDMR; i++)
+            {
+                string IP = _dataMan.GetIPAdress(_dataMan.mReader[i].mSystem);
+
+                if (IP == _loading.DMR_IP[0])
+                {
+                    cbListReader.Items.Add("READER 1");
+                }
+                else if (IP == _loading.DMR_IP[1])
+                {
+                    cbListReader.Items.Add("READER 2");
+                }
+                else if (IP == _loading.DMR_IP[2])
+                {
+                    cbListReader.Items.Add("READER 3");
+                }
+                else if (IP == _loading.DMR_IP[3])
+                {
+                    cbListReader.Items.Add("READER 4");
+                }
+            }
+        }
+        private void frmSetting_Load(object sender, EventArgs e)
+        {
+            List<string> toolblockNames = new List<string>();
+            foreach (CogToolBlock toolblock in _loading._toolBlockManager)
+            {
+                toolblockNames.Add(toolblock.Name);
+            }
+            cbListToolBlock.DataSource = toolblockNames;
+            cbListSpecs.DataSource = toolblockNames;
+
+            dimensionSpecUC1.groupName.Text = "D1";
+            dimensionSpecUC2.groupName.Text = "D2";
+            dimensionSpecUC3.groupName.Text = "D3";
+            dimensionSpecUC4.groupName.Text = "D4";
+            dimensionSpecUC5.groupName.Text = "D5";
+            dimensionSpecUC6.groupName.Text = "D6";
+
+            dimensionSpecUC1.DimensionSpecChanged += DimensionSpecUC1_DimensionSpecChanged;
+            dimensionSpecUC2.DimensionSpecChanged += DimensionSpecUC2_DimensionSpecChanged;
+            dimensionSpecUC3.DimensionSpecChanged += DimensionSpecUC3_DimensionSpecChanged;
+            dimensionSpecUC4.DimensionSpecChanged += DimensionSpecUC4_DimensionSpecChanged;
+            dimensionSpecUC5.DimensionSpecChanged += DimensionSpecUC5_DimensionSpecChanged;
+            dimensionSpecUC6.DimensionSpecChanged += DimensionSpecUC6_DimensionSpecChanged;
+
+            _camera.VisionImageAvailable += _camera_VisionImageAvailable;
+            _visionControl.VisionControlUserResultAvailable += _visionControl_VisionControlUserResultAvailable;
+            _dataMan.ReaderImageAvailable += _dataMan_ReaderImageAvailable;
+
+
+            if (_camera.numAcqs.Count > 0)
+                cbListCamera.SelectedIndex = 0;
+
+            if (_dataMan.mReader.Count() > 0)
+                cbListReader.SelectedIndex = 0;
+
+            tbHistoryDirectory.Text = _loading.historyDirectory;
+            //PVK20241209
+            try
+            {
+                tbModelSetting.Text = ModelSetting.ToString();
+            }
+            catch (Exception ex)
+            {
+                //MessageBox.Show("Model Name is Null");
+            }
+        }
+
+
+        #endregion
+
+        #region Tab PLC
+        private async void btnWrite_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                string input = _plc.GetWriteValueText(tbWriteValue.Text);
+                // ushort
+                if (input.StartsWith("[") && input.EndsWith("]"))
+                {
+                    try
+                    {
+                        ushort[] value = input.ToStringArray<ushort>();
+
+                        //if (isAsync)
+                        await _plc.RenderWriteResult(() => _plc.readWriteNet.WriteAsync(tbWriteAdd.Text, value), tbWriteAdd.Text, input);
+                        //else
+                        //RenderWriteResult(() => readWriteNet.Write(textBox_write_address.Text, value), button_write_ushort, input);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("ushort Data is not corrent: " + input + Environment.NewLine + ex.Message);
+                    }
+                }
+                else
+                {
+                    if (ushort.TryParse(input, out ushort value))
+                    {
+                        //if (isAsync)
+                        await _plc.RenderWriteResult(() => _plc.readWriteNet.WriteAsync(tbWriteAdd.Text, value), tbWriteAdd.Text, input);
+                        //else
+                        //RenderWriteResult(() => readWriteNet.Write(textBox_write_address.Text, value), button_write_ushort, input);
+                    }
+                    else
+                        MessageBox.Show("ushort Data is not corrent: " + input);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.ToString());
+            }
+        }
+
+        private async void btnRead_Click(object sender, EventArgs e)
+        {
+            btnRead.Enabled = false;
+            try
+            {
+                if (tbNumRegister.Text == "1")
+                {
+                    OperateResult<ushort> read = await _plc.readWriteNet.ReadUInt16Async(tbReadAdd.Text);
+                    PLCUtils.ReadResultRender(read, tbReadAdd.Text, tbReadValue);
+                }
+                else
+                {
+                    OperateResult<ushort[]> read = await _plc.readWriteNet.ReadUInt16Async(tbReadAdd.Text, ushort.Parse(tbNumRegister.Text));
+                    PLCUtils.ReadResultRender(read, tbReadAdd.Text, tbReadValue);
+                }
+                btnRead.Enabled = true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.ToString());
+            }
+        }
+        #endregion
+
+        #region Tab Camera
+        private void btnLive_Click(object sender, EventArgs e)
+        {
+            if (btnLive.Text == "LIVE")
+            {
+                btnLive.BackColor = Color.Red;
+                if (cbListCamera.SelectedIndex != -1)
+                {
+                    _camera.ISLIVE[cbListCamera.SelectedItem.ToString()] = true;
+                    try
+                    {
+                        _camera.SetupRunContinuos(cbListCamera.SelectedIndex);
+                        pictureBoxImage.StartLiveDisplay(_camera.mCamera[cbListCamera.SelectedIndex].mAcqFifo);
+                    }
+                    catch (Exception ex)
+                    {
+
+                        MessageBox.Show(ex.ToString());
+                    }
+
+                    _utility.SetControlPropertyThreadSafe(btnLive, "Text", "STOP LIVE");
+                    SettingTabControl.ItemSize = new Size(0, 32);
+                    cbListCamera.Enabled = false;
+                    //_mFrmMain.EnabledButton(true, true, false);
+                }
+                else
+                {
+                    MessageBox.Show("Please select camera");
+                }
+            }
+            else if (btnLive.Text == "STOP LIVE")
+            {
+                _camera.ISLIVE[cbListCamera.SelectedItem.ToString()] = false;
+                try
+                {
+                    pictureBoxImage.StopLiveDisplay();
+                    //pictureBoxImage.Image = null;
+                    if (Convert.ToInt32(tbExposure.Text) > 0 && Convert.ToInt32(tbExposure.Text) < 501)
+                    {
+                        SetExposureCamera(cbListCamera.SelectedIndex, tbExposure.Text);
+                    }
+                    else
+                    {
+                        MessageBox.Show("Exposure Time: 1 => 500");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.ToString());
+                }
+                _utility.SetControlPropertyThreadSafe(btnLive, "Text", "LIVE");
+                btnLive.BackColor = Color.Gainsboro;
+                SettingTabControl.ItemSize = new Size(250, 32);
+                pictureBoxImage.Image = null;
+                cbListCamera.Enabled = true;
+                //_mFrmMain.EnabledButton(true, false, false);
+            }
+        }
+
+        private void tbExposure_TextChanged(object sender, EventArgs e)
+        {
+            if (cbListCamera.SelectedIndex != -1)
+                SetExposureCamera(cbListCamera.SelectedIndex, tbExposure.Text);
+        }
+
+        private void btnSetExposure_Click(object sender, EventArgs e)
+        {
+            int sequence = cbSequence.SelectedIndex + 1;
+            string inputName = "Exposure" + sequence.ToString();
+            MappingToolBlockExposure(cbListCamera.SelectedIndex, inputName, tbExposure.Text);
+
+
+        }
+
+        private void MappingToolBlockExposure(int deviceIndex, string inputName, string val)
+        {
+            if (IsNumberOnly(val))
+            {
+                int exp = Convert.ToInt32(val);
+                if (deviceIndex == 0)
+                {
+                    _loading._toolBlockManager[0].Inputs[inputName].Value = exp;
+                    _loading._toolBlockManager[4].Inputs[inputName].Value = exp;
+                }
+                else if (deviceIndex == 1)
+                {
+                    _loading._toolBlockManager[1].Inputs[inputName].Value = exp;
+                    _loading._toolBlockManager[5].Inputs[inputName].Value = exp;
+                }
+                else if (deviceIndex == 2)
+                {
+                    _loading._toolBlockManager[2].Inputs[inputName].Value = exp;
+                    _loading._toolBlockManager[6].Inputs[inputName].Value = exp;
+                }
+                else if (deviceIndex == 3)
+                {
+                    _loading._toolBlockManager[3].Inputs[inputName].Value = exp;
+                    _loading._toolBlockManager[7].Inputs[inputName].Value = exp;
+                }
+            }
+        }
+
+        private void cbListCamera_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            RefreshCameraExposure();
+
+        }
+        private void cbSequence_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            RefreshCameraExposure();
+        }
+
+        private void RefreshCameraExposure()
+        {
+            try
+            {
+                int i = cbListCamera.SelectedIndex;
+                int sequence = cbSequence.SelectedIndex + 1;
+                int exp = (int)_loading._toolBlockManager[i].Inputs["Exposure" + sequence.ToString()].Value;
+                SetExposureCamera(i, exp.ToString());
+                tbExposure.Text = exp.ToString();
+            }
+            catch (Exception)
+            {
+                MessageBox.Show("Failed to set camera exposure");
+            }
+        }
+
+        private void ckbLED1_CheckedChanged(object sender, EventArgs e)
+        {
+            if (ckbLED1.Checked == true)
+                _loading.LedControl(1, true);
+            else _loading.LedControl(1, false);
+        }
+
+        private void ckbLED2_CheckedChanged(object sender, EventArgs e)
+        {
+            if (ckbLED2.Checked == true)
+                _loading.LedControl(2, true);
+            else _loading.LedControl(2, false);
+        }
+
+        private void ckbLED3_CheckedChanged(object sender, EventArgs e)
+        {
+            if (ckbLED3.Checked == true)
+                _loading.LedControl(3, true);
+            else _loading.LedControl(3, false);
+        }
+
+        private void ckbLED4_CheckedChanged(object sender, EventArgs e)
+        {
+            if (ckbLED4.Checked == true)
+                _loading.LedControl(4, true);
+            else _loading.LedControl(4, false);
+
+        }
+        #endregion
+
+        #region Camera & Result Events
+        private void _visionControl_VisionControlUserResultAvailable(object sender, VisionControl.VisionControlUserResultAvailableEventArgs e)
+        {
+
+        }
+
+        private void _camera_VisionImageAvailable(object sender, Camera.VinsionImageAvailableEventArgs e)
+        {
+            if (_loading.formState == frmLoading.FormState.SETTING)
+                _visionControl.StartRunningOnce(e.Image.ToBitmap(), selectedToolBlock, _loading.triggerPosition);
+        }
+        #endregion
+
+        #region Tab Program
+        private void bntRunOnce_Click(object sender, EventArgs e)
+        {
+            int camId = 0;
+
+            if (selectedToolBlock == 0 || selectedToolBlock == 4)
+            { camId = 0; }
+            else if (selectedToolBlock == 1 || selectedToolBlock == 5)
+            { camId = 1; }
+            else if (selectedToolBlock == 2 || selectedToolBlock == 6)
+            { camId = 2; }
+            else if (selectedToolBlock == 3 || selectedToolBlock == 7)
+            { camId = 3; }
+
+            _camera.RunOnce(camId);
+        }
+
+        private void btSaveToolBlock_Click(object sender, EventArgs e)
+        {
+            SaveJob();
+            //MessageBox.Show("Program Saved", "Notify", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void SaveJob()
+        {
+            try
+            {
+                string path = Path.Combine(_loading.modelDirectory, _loading.modelName, "Program.vpp");
+                _utility.SaveJobFile(path, _loading.job);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.ToString(), "Save Job Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private void btnTest_Click(object sender, EventArgs e)
+        {
+            _loading._toolBlockManager[selectedToolBlock].Run();
+        }
+        private void btnShowProgramTB_Click(object sender, EventArgs e)
+        {
+            cogToolBlockEditV21.Subject = _loading.job;
+        }
+
+        int selectedToolBlock = 0;
+        private void cbListToolBlock_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (cbListToolBlock.SelectedIndex != -1)
+            {
+                try
+                {
+                    selectedToolBlock = cbListToolBlock.SelectedIndex;
+                    if (cbListSpecs.Items.Count > 0)
+                        cbListSpecs.SelectedIndex = selectedToolBlock;
+
+                    LoadToolBlockDimension(cbListToolBlock.SelectedItem.ToString());
+
+
+                    //UpdateDimensionOnSpecTab();
+
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.ToString(), "Warning",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning); ;
+                }
+            }
+        }
+
+        Dictionary<string, double> dimSpecs;
+        private void LoadToolBlockDimension(string toolName)
+        {
+            for (int i = 0; i < _loading._toolBlockManager.Count; i++)
+            {
+                if (_loading._toolBlockManager[i].Name == toolName)
+                {
+                    checkpoint = (CogToolBlock)_loading._toolBlockManager[i];
+                    cogToolBlockEditV21.Subject = checkpoint;
+
+
+                }
+            }
+        }
+
+        private void UpdateDimensionOnSpecTab()
+        {
+            dimensionSpecUC1.dimSpecs = dimSpecsArr[0];
+            dimensionSpecUC1.UpdateUI();
+
+            dimensionSpecUC2.dimSpecs = dimSpecsArr[1];
+            dimensionSpecUC2.UpdateUI();
+
+            dimensionSpecUC3.dimSpecs = dimSpecsArr[2];
+            dimensionSpecUC3.UpdateUI();
+
+            dimensionSpecUC4.dimSpecs = dimSpecsArr[3];
+            dimensionSpecUC4.UpdateUI();
+
+            dimensionSpecUC5.dimSpecs = dimSpecsArr[4];
+            dimensionSpecUC5.UpdateUI();
+
+            dimensionSpecUC6.dimSpecs = dimSpecsArr[5];
+            dimensionSpecUC6.UpdateUI();
+        }
+        #endregion
+
+        #region Tab Others
+        private void btnOpenHistoryDialog_Click(object sender, EventArgs e)
+        {
+            Process.Start(_loading.historyDirectory);
+        }
+
+        private void ckbUseCodeData_CheckedChanged(object sender, EventArgs e)
+        {
+            if (ckbUseCodeData.Checked == true)
+                _loading.useCodeData = true;
+            else _loading.useCodeData = false;
+        }
+        #endregion
+
+        #region Supporter
+        private bool IsNumberOnly(string str)
+        {
+            Regex regex = new Regex(@"^\d+$");
+            return regex.IsMatch(str);
+        }
+        private void SetExposureCamera(int index, string value)
+        {
+            if (IsNumberOnly(value))
+                _camera.mCamera[index].mAcqFifo.OwnedExposureParams.Exposure = Convert.ToUInt32(value);
+        }
+        private void SetExposureReader(int index, string value)
+        {
+            if (IsNumberOnly(value))
+                if (Convert.ToInt32(value) > 5) //min exposure value
+                    _dataMan.SetExposure(index, value);
+        }
+        #endregion
+    }
+}

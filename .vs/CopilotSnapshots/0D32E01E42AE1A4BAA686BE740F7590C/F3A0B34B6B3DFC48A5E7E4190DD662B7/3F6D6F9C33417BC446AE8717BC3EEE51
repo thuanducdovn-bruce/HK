@@ -1,0 +1,579 @@
+﻿using Insnex.Vision2D.ToolBlock;
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace HK_Inspection
+{
+    public partial class FormMain : Form
+    {
+        private Form activeForm;
+        private FormRun formRun;
+        private FormSetting formSetting;
+        private Camera camera;
+        private InsToolBlock job;
+        private VisionControl visionControl;
+        private List<InsToolBlock> toolBlockManager;
+        private readonly System.Timers.Timer clock = new System.Timers.Timer();
+        private bool isRunning;
+        private bool isInitialized;
+        private bool isInitializing;
+        private bool isHomeView = true;
+        private string modelName;
+        private int countOK;
+        private int countNG;
+        private int countTotal;
+        private readonly bool[] camConnection = new bool[3];
+
+        public bool isLogImages;
+        public bool isLogNGImages = true;
+
+        public delegate void TriggerHandler();
+        public event TriggerHandler TriggerP1;
+        public event TriggerHandler TriggerP2;
+
+        public string ModelSetting { get; private set; }
+
+        public FormMain()
+        {
+            InitializeComponent();
+            Load += FormMain_Load;
+            FormClosing += FormMain_FormClosing;
+            btnStart.Click += btnStart_Click;
+            btnStop.Click += btnStop_Click;
+            
+            btnReset.Click += btnReset_Click;
+            itemHome.Click += itemHome_Click;
+            itemSetting.Click += itemSetting_Click;
+            
+
+            clock.Interval = 1000;
+            
+
+            pbLangENG.Visible = false;
+            pbLangVIE.Visible = false;
+            lbConnectLED.Visible = false;
+            lbConnectPLC.Visible = false;
+            btnShowPLC.Visible = false;
+            ckbLogPLC.Visible = false;
+        }
+
+        public void Initialize(InsToolBlock job, string modelName)
+        {
+            this.job = job;
+            this.modelName = modelName;
+        }
+        #region Form Event
+        private void FormMain_Load(object sender, EventArgs e)
+        {
+            formRun = new FormRun();
+            formSetting = new FormSetting();
+            OpenChildForm(formRun);
+
+
+            string toolBlockModelName = null;
+            if (job != null)
+            {
+                try
+                {
+                    var terminal = job.Inputs["ModelName"];
+                    if (terminal != null)
+                    {
+                        object modelSettingValue = job.Inputs["ModelName"].Value;
+                        toolBlockModelName = modelSettingValue == null ? null : modelSettingValue.ToString();
+                    }
+                    else
+                    {
+                        ModelSetting = "inspection";
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(toolBlockModelName))
+            {
+                modelName = "inspection";
+            }
+            else
+            {
+                ModelSetting = toolBlockModelName;
+                if (string.IsNullOrWhiteSpace(modelName))
+                    modelName = !string.IsNullOrWhiteSpace(job.Name) ? job.Name : toolBlockModelName;
+            }
+
+            lbModelName.Text = modelName;
+            lbModelSetting.Text = ModelSetting;
+
+            UpdateUIDevicesConnection();
+            UpdateScoreBoard();
+            UpdateRunControls();
+            clock.Start();
+        }
+
+        private void OpenChildForm(Form childForm)
+        {
+            if (childForm == null || activeForm == childForm)
+                return;
+
+            activeForm = childForm;
+            childForm.TopLevel = false;
+            childForm.FormBorderStyle = FormBorderStyle.None;
+            childForm.Dock = DockStyle.Fill;
+            tLPChildForm.Controls.Clear();
+            tLPChildForm.Controls.Add(childForm);
+            childForm.Show();
+            childForm.BringToFront();
+        }
+
+        private void Clock_Elapsed(object sender, System.Timers.ElapsedEventArgs e)
+        {
+            if (IsDisposed || !IsHandleCreated)
+                return;
+
+            BeginInvoke((MethodInvoker)delegate
+            {
+                lbDate.Text = DateTime.Now.ToString("yyyy-MM-dd");
+                lbTime.Text = DateTime.Now.ToString("HH:mm:ss");
+                UpdateUIDevicesConnection();
+            });
+        }
+        private void FormMain_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (isInitializing)
+            {
+                MessageBox.Show("Wait for initialization to finish before exiting.", "Initializing",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                e.Cancel = true;
+                return;
+            }
+
+            if (isRunning)
+            {
+                MessageBox.Show("Stop the system before exiting.", "System running",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                e.Cancel = true;
+                return;
+            }
+
+            DialogResult confirm = MessageBox.Show("Are you sure you want to exit?", "Exit",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (confirm != DialogResult.Yes)
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            clock.Stop();
+            if (visionControl != null)
+                visionControl.AttachToJobManager(false);
+            if (camera != null)
+            {
+                for (int i = 0; i < camera.mCamera.Length; i++)
+                    camera.DestroyCamera(i);
+            }
+
+            if (formRun != null)
+                formRun.Dispose();
+            if (formSetting != null)
+                formSetting.Dispose();
+        }
+        #endregion
+
+        #region Buttons Clicked
+
+        public void OpenModelClick(object sender, EventArgs e)
+        {
+            if (sender == null)
+                return;
+
+            modelName = sender.ToString();
+            lbModelName.Text = modelName;
+        }
+
+        private void itemSetting_Click(object sender, EventArgs e)
+        {
+            isHomeView = false;
+            OpenChildForm(formSetting);
+            UpdateRunControls();
+        }
+
+        private void itemHome_Click(object sender, EventArgs e)
+        {
+            isHomeView = true;
+            OpenChildForm(formRun);
+            lbModelSetting.Text = ModelSetting ?? string.Empty;
+            UpdateScoreBoard();
+            UpdateRunControls();
+        }
+
+        private void btnReset_Click(object sender, EventArgs e)
+        {
+            if (isRunning || isInitializing || !isHomeView)
+                return;
+
+            DialogResult confirm = MessageBox.Show("Are you sure you want to reset the counters?",
+                "Reset counters", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (confirm != DialogResult.Yes)
+                return;
+
+            countOK = 0;
+            countNG = 0;
+            countTotal = 0;
+            UpdateScoreBoard();
+        }
+
+        private async void btnStart_Click(object sender, EventArgs e)
+        {
+            if (isRunning || isInitializing)
+                return;
+
+            if (isInitialized)
+            {
+                isRunning = true;
+                UpdateRunControls();
+                UpdateSystemStatus();
+                UpdateSystemProcess();
+                return;
+            }
+
+            isInitializing = true;
+            UpdateRunControls();
+            try
+            {
+                if (job == null)
+                    throw new InvalidOperationException("No Insnex program has been loaded.");
+
+                camera = await Task.Run(() => new Camera());
+                int connectedCameraCount = 0;
+                for (int i = 0; i < camera.mCamera.Length; i++)
+                {
+                    if (camera.mCamera[i].isConnect)
+                        connectedCameraCount++;
+                }
+
+                UpdateUIDevicesConnection();
+                if (connectedCameraCount != 3)
+                    throw new InvalidOperationException(string.Format(
+                        "Three cameras are required; {0} connected.", connectedCameraCount));
+
+                toolBlockManager = new List<InsToolBlock> { job };
+                visionControl = new VisionControl(ref toolBlockManager);
+                visionControl.AttachToJobManager(true);
+                isInitialized = true;
+                isRunning = true;
+                UpdateSystemStatus();
+                UpdateSystemProcess();
+            }
+            catch (Exception ex)
+            {
+                if (visionControl != null)
+                    visionControl.AttachToJobManager(false);
+                visionControl = null;
+                toolBlockManager = null;
+
+                if (camera != null)
+                {
+                    for (int i = 0; i < camera.mCamera.Length; i++)
+                        camera.DestroyCamera(i);
+                    camera = null;
+                }
+
+                isInitialized = false;
+                isRunning = false;
+                UpdateSystemStatus();
+                UpdateSystemProcess();
+                MessageBox.Show(ex.Message, "Initialization failed", MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            finally
+            {
+                isInitializing = false;
+                UpdateUIDevicesConnection();
+                UpdateRunControls();
+            }
+        }
+
+        private void btnStop_Click(object sender, EventArgs e)
+        {
+            isRunning = false;
+            if (formRun != null)
+                formRun.manualTrigger = false;
+            UpdateRunControls();
+            UpdateSystemStatus();
+            UpdateSystemProcess();
+        }
+
+        private void btnTriggerP1_Click(object sender, EventArgs e)
+        {
+            if (!isRunning || !isInitialized)
+                return;
+
+            if (formRun != null)
+                formRun.manualTrigger = true;
+            TriggerP1?.Invoke();
+            TriggerConnectedCamerasOnce();
+        }
+
+        private void btnTriggerP2_Click(object sender, EventArgs e)
+        {
+            if (!isRunning || !isInitialized)
+                return;
+
+            if (formRun != null)
+                formRun.manualTrigger = true;
+            TriggerP2?.Invoke();
+            TriggerConnectedCamerasOnce();
+        }
+
+        private void TriggerConnectedCamerasOnce()
+        {
+            if (camera == null)
+                return;
+
+            for (int i = 0; i < 3; i++)
+            {
+                if (GetCamStatus(i))
+                    camera.RunOnce(i);
+            }
+        }
+
+        private void cbLogImages_CheckedChanged(object sender, EventArgs e)
+        {
+            isLogImages = ckbLogOKImages.Checked;
+        }
+
+        private void ckbLogNGImages_CheckedChanged(object sender, EventArgs e)
+        {
+            isLogNGImages = ckbLogNGImages.Checked;
+        }
+
+        private bool GetCamStatus(int camId)
+        {
+            if (camera == null || camId < 0 || camId >= camera.mCamera.Length || camId >= camConnection.Length)
+            {
+                if (camId >= 0 && camId < camConnection.Length)
+                    camConnection[camId] = false;
+                return false;
+            }
+
+            camConnection[camId] = camera.mCamera[camId].isConnect;
+            return camConnection[camId];
+        }
+
+        #region Optional Functions
+        public delegate void TriggerHandler();
+        public event TriggerHandler TriggerP1;
+        public event TriggerHandler TriggerP2;
+
+        /*
+        private bool isLogPLC;
+
+        private void ckbLogPLC_CheckedChanged(object sender, EventArgs e)
+        {
+            isLogPLC = ckbLogPLC.Checked;
+        }
+
+        private void btnShowPLC_Click(object sender, EventArgs e)
+        {
+            MessageBox.Show(plcString);
+        }
+        */
+        #endregion
+
+        #endregion
+
+        #region Update UI
+
+        private void UpdateCameraStatus()
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                bool connected = GetCamStatus(i);
+                Label status = i == 0 ? lbConnectCam1 : i == 1 ? lbConnectCam2 : lbConnectCam3;
+                status.Text = string.Format("{0} CAM {1}", connected ? "🟢" : "🔴", i + 1);
+                status.ForeColor = connected ? Color.LimeGreen : Color.Red;
+            }
+        }
+
+        public void UpdateUIDevicesConnection()
+        {
+            UpdateCameraStatus();
+            if (isHomeView && !isRunning)
+                UpdateRunControls();
+        }
+
+        private void UpdateScoreBoard()
+        {
+            countTotal = countOK + countNG;
+            lbOKCount.Text = countOK.ToString();
+            lbNGCount.Text = countNG.ToString();
+            lbTotalCount.Text = countTotal.ToString();
+        }
+
+        private bool AreCamerasReady()
+        {
+            if (camera == null)
+                return job != null;
+
+            for (int i = 0; i < 3; i++)
+            {
+                if (i >= camera.mCamera.Length || !camera.mCamera[i].isConnect)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private void EnableControls(bool home, bool ready, bool running)
+        {
+            btnStart.Enabled = home && ready && !running && !isInitializing;
+            btnStart.BackColor = btnStart.Enabled ? Color.Green : Color.Gray;
+
+            btnStop.Enabled = home && running;
+            btnStop.BackColor = btnStop.Enabled ? Color.Firebrick : Color.Gray;
+
+            MainMenuStrip.Enabled = !running && !isInitializing;
+            btnTriggerP1.Enabled = home && ready && running && isInitialized;
+            btnTriggerP2.Enabled = home && ready && running && isInitialized;
+            btnReset.Enabled = home && !running && !isInitializing;
+        }
+
+        private void UpdateRunControls()
+        {
+            EnableControls(isHomeView, AreCamerasReady(), isRunning);
+        }
+
+        private void UpdateSystemStatus()
+        {
+            // PLC status writes are intentionally deferred until the PLC register mapping is defined.
+            lbStatusERROR.ForeColor = SystemColors.Control;
+            lbStatusSTART.ForeColor = isRunning ? Color.LimeGreen : SystemColors.Control;
+            lbStatusSTOP.ForeColor = isRunning ? SystemColors.Control : Color.Red;
+        }
+
+        public void UpdateSystemProcess()
+        {
+            // PLC process-state writes are intentionally deferred until the PLC register mapping is defined.
+            lbProcessReady.ForeColor = isInitialized ? Color.Yellow : SystemColors.Control;
+            lbProcessReadRow1.ForeColor = SystemColors.Control;
+            lbProcessBusy1.ForeColor = SystemColors.Control;
+            lbProcessComplete1.ForeColor = SystemColors.Control;
+            lbProcessReadRow2.ForeColor = SystemColors.Control;
+            lbProcessBusy2.ForeColor = SystemColors.Control;
+            lbProcessComplete2.ForeColor = SystemColors.Control;
+        }
+
+        #endregion
+
+        #region Optional Functions
+
+        public delegate void TriggerHandler();
+        public event TriggerHandler TriggerP1;
+        public event TriggerHandler TriggerP2;
+        public event TriggerHandler ChangeLanguage;
+
+        private void btnTriggerP1_Click(object sender, EventArgs e)
+        {
+            _frmRun.manualTrigger = true;
+            TriggerP1?.Invoke();
+        }
+
+        private void btnTriggerP2_Click(object sender, EventArgs e)
+        {
+            _frmRun.manualTrigger = true;
+            TriggerP2?.Invoke();
+        }
+
+        public bool isLogPLC = false;
+        private void ckbLogPLC_CheckedChanged(object sender, EventArgs e)
+        {
+            if (ckbLogPLC.Checked) isLogPLC = true;
+            else isLogPLC = false;
+        }
+
+        private void btnShowPLC_Click(object sender, EventArgs e)
+        {
+            MessageBox.Show(_loading.plcString);
+        }
+
+        private void cbLogImages_CheckedChanged(object sender, EventArgs e)
+        {
+            if (ckbLogOKImages.Checked == true) _loading.isLogImages = true;
+            else _loading.isLogImages = false;
+        }
+
+        private void ckbLogNGImages_CheckedChanged(object sender, EventArgs e)
+        {
+            if (ckbLogNGImages.Checked == true) _loading.isLogNGImages = true;
+            else _loading.isLogNGImages = false;
+        }
+
+        private void GetCamStatus(int camId)
+        {
+            var stt = _camera.mCamera[camId].mAcqFifo.FrameGrabber.GetStatus(false);
+            if (stt == CogFrameGrabberStatusConstants.Active)
+                camConnection[camId] = true;
+            else camConnection[camId] = false;
+        }
+
+        string lastday;
+        private void Clock_Elapsed(object sender, System.Timers.ElapsedEventArgs e)
+        {
+            Invoke(new MethodInvoker(delegate ()
+            {
+                lastday = lbDate.Text.Substring(0, 2);
+
+                lbTime.Text = DateTime.Now.ToString("T");
+                lbDate.Text = DateTime.Now.ToString("dd/MM/yyyy");
+
+                string today = lbDate.Text.Substring(0, 2);
+
+                if (today != lastday)
+                    _loading.LogPathDifine();
+            }));
+        }
+        #endregion
+
+        #region Supporter
+        public void AddModelToMenuStrip()
+        {
+            ToolStripMenuItem menuItem = (ToolStripMenuItem)MainMenuStrip.Items[0];
+
+
+            ToolStripMenuItem openItem = new ToolStripMenuItem("📂 SELECT MODEL");
+            menuItem.DropDownItems.Add(openItem);
+
+            foreach (var model in _loading.modelList)
+            {
+                ToolStripMenuItem subItem = new ToolStripMenuItem(model, null, OpenModelClick);
+                openItem.DropDownItems.Add(subItem);
+            }
+        }
+
+        public void OpenChildForm(Form childForm, object btnSender)
+        {
+            if (this.tLPChildForm.Controls.Count > 0)
+            {
+                this.tLPChildForm.Controls.Remove(activeForm);
+            }
+            if (activeForm != null)
+                activeForm.Hide();
+
+            activeForm = childForm;
+            childForm.TopLevel = false;
+            childForm.FormBorderStyle = FormBorderStyle.None;
+            childForm.Dock = DockStyle.Fill;
+            this.tLPChildForm.Controls.Add(childForm);
+            this.tLPChildForm.Tag = childForm;
+            childForm.BringToFront();
+            childForm.Show();
+        }
+        #endregion
+
+
+    }
+}

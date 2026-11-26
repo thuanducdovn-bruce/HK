@@ -1,0 +1,176 @@
+﻿using Insnex.Vision2D.ToolBlock;
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Timers;
+using System.Windows.Forms;
+
+namespace HK_Inspection
+{
+    public partial class FormMain : Form
+    {
+        private Form activeForm;
+        private FormRun formRun;
+        private FormSetting formSetting;
+        private Camera camera;
+        private InsToolBlock job;
+        private VisionControl visionControl;
+        private List<InsToolBlock> toolBlockManager;
+        private readonly Timer clock = new Timer();
+        private bool isRunning;
+        private string modelName;
+
+        public string ModelSetting { get; private set; }
+
+        public FormMain()
+        {
+            InitializeComponent();
+            Load += FormMain_Load;
+            FormClosing += FormMain_FormClosing;
+            btnStart.Click += btnStart_Click;
+            btnStop.Click += btnStop_Click;
+            btnTriggerP1.Click += btnTrigger_Click;
+            btnTriggerP2.Click += btnTrigger_Click;
+            itemHome.Click += (sender, e) => OpenChildForm(formRun);
+            itemSetting.Click += (sender, e) => OpenChildForm(formSetting);
+
+            clock.Interval = 1000;
+            clock.Elapsed += Clock_Elapsed;
+
+            pbLangENG.Visible = false;
+            pbLangVIE.Visible = false;
+            lbConnectLED.Visible = false;
+            lbConnectPLC.Visible = false;
+            btnShowPLC.Visible = false;
+            ckbLogPLC.Visible = false;
+        }
+
+        public void Initialize(Camera camera, InsToolBlock job, VisionControl visionControl,
+            List<InsToolBlock> toolBlockManager, string modelSetting, string modelName = null)
+        {
+            this.camera = camera;
+            this.job = job;
+            this.visionControl = visionControl;
+            this.toolBlockManager = toolBlockManager;
+            ModelSetting = modelSetting;
+            this.modelName = modelName;
+        }
+
+        private void FormMain_Load(object sender, EventArgs e)
+        {
+            formRun = new FormRun();
+            formSetting = new FormSetting();
+            OpenChildForm(formRun);
+
+            lbModelName.Text = modelName ?? (job != null ? job.Name : string.Empty);
+            lbModelSetting.Text = ModelSetting ?? string.Empty;
+            UpdateCameraStatus();
+            UpdateRunControls();
+            clock.Start();
+        }
+
+        private void OpenChildForm(Form childForm)
+        {
+            if (childForm == null || activeForm == childForm)
+                return;
+
+            activeForm = childForm;
+            childForm.TopLevel = false;
+            childForm.FormBorderStyle = FormBorderStyle.None;
+            childForm.Dock = DockStyle.Fill;
+            tLPChildForm.Controls.Clear();
+            tLPChildForm.Controls.Add(childForm);
+            childForm.Show();
+            childForm.BringToFront();
+        }
+
+        private void Clock_Elapsed(object sender, ElapsedEventArgs e)
+        {
+            if (IsDisposed || !IsHandleCreated)
+                return;
+
+            BeginInvoke((MethodInvoker)delegate
+            {
+                lbDate.Text = DateTime.Now.ToString("yyyy-MM-dd");
+                lbTime.Text = DateTime.Now.ToString("HH:mm:ss");
+                UpdateCameraStatus();
+            });
+        }
+
+        private void UpdateCameraStatus()
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                bool connected = camera != null && i < camera.mCamera.Length && camera.mCamera[i].isConnect;
+                Label status = i == 0 ? lbConnectCam1 : i == 1 ? lbConnectCam2 : lbConnectCam3;
+                status.Text = string.Format("{0} CAM {1}", connected ? "🟢" : "🔴", i + 1);
+                status.ForeColor = connected ? Color.LimeGreen : Color.Red;
+            }
+        }
+
+        private void btnStart_Click(object sender, EventArgs e)
+        {
+            isRunning = true;
+            UpdateRunControls();
+        }
+
+        private void btnStop_Click(object sender, EventArgs e)
+        {
+            isRunning = false;
+            UpdateRunControls();
+        }
+
+        private void btnTrigger_Click(object sender, EventArgs e)
+        {
+            if (!isRunning || camera == null)
+                return;
+
+            for (int i = 0; i < 3; i++)
+            {
+                if (camera.mCamera[i].isConnect)
+                    camera.RunOnce(i);
+            }
+        }
+
+        private void UpdateRunControls()
+        {
+            btnStart.Enabled = !isRunning;
+            btnStop.Enabled = isRunning;
+            btnTriggerP1.Enabled = isRunning;
+            btnTriggerP2.Enabled = isRunning;
+        }
+
+        private void FormMain_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (isRunning)
+            {
+                MessageBox.Show("Stop the system before exiting.", "System running",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                e.Cancel = true;
+                return;
+            }
+
+            DialogResult confirm = MessageBox.Show("Are you sure you want to exit?", "Exit",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (confirm != DialogResult.Yes)
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            clock.Stop();
+            if (visionControl != null)
+                visionControl.AttachToJobManager(false);
+            if (camera != null)
+            {
+                for (int i = 0; i < camera.mCamera.Length; i++)
+                    camera.DestroyCamera(i);
+            }
+
+            if (formRun != null)
+                formRun.Dispose();
+            if (formSetting != null)
+                formSetting.Dispose();
+        }
+    }
+}
